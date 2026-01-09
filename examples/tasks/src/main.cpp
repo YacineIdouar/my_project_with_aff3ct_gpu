@@ -66,7 +66,6 @@ int main(int argc, char** argv)
 
     // sockets binding (connect the sockets of the tasks = fill the input sockets with the output sockets)
     using namespace module;
-
     (*m.encoder)[      "encode::U_K" ] = (*m.source )[   "generate::out_data"];
     (*m.modem  )[    "modulate::X_N1"] = (*m.encoder)[     "encode::X_N"     ];
     (*m.channel)[   "add_noise::X_N" ] = (*m.modem  )[   "modulate::X_N2"    ];
