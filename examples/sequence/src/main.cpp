@@ -57,8 +57,8 @@ struct utils
                 std::unique_ptr<       tools::Sigma<>               >  noise;       // a sigma noise type
     std::vector<std::unique_ptr<spu::  tools::Reporter              >> reporters;   // list of reporters displayed in the terminal
                 std::unique_ptr<spu::  tools::Terminal              >  terminal;    // manage the output text in the terminal
-                std::unique_ptr<       tools::Monitor_BFER_reduction>  monitor_red; // main monitor object that reduce all the thread monitors
-                std::unique_ptr<spu::runtime::Sequence              >  sequence;
+                std::unique_ptr<       tools::Monitor_BFER_reduction>  monitor_red; // main monitor object that reduces all the thread monitors
+                std::unique_ptr<spu::runtime::Sequence              >  sequence;    // a sequence to run the processing chain
 };
 void init_utils(const params &p, const modules &m, utils &u);
 
@@ -82,7 +82,6 @@ int main(int argc, char** argv)
     modules m; init_modules(p, m         ); // create and initialize the modules
 
     // sockets binding (connect the sockets of the tasks = fill the input sockets with the output sockets)
-    using namespace module;
     (*m.encoder)[      "encode::U_K" ] = (*m.source )[   "generate::out_data"];
     (*m.modem  )[    "modulate::X_N1"] = (*m.encoder)[     "encode::X_N"     ];
     (*m.channel)[   "add_noise::X_N" ] = (*m.modem  )[   "modulate::X_N2"    ];
@@ -90,10 +89,9 @@ int main(int argc, char** argv)
     (*m.decoder)[ "decode_siho::Y_N" ] = (*m.modem  )[ "demodulate::Y_N2"    ];
     (*m.monitor)["check_errors::U"   ] = (*m.source )[   "generate::out_data"];
     (*m.monitor)["check_errors::V"   ] = (*m.decoder)["decode_siho::V_K"     ];
-
     std::vector<float> sigma(1);
-    (*m.channel)[ "add_noise::CP"] = sigma;
-    (*m.modem  )["demodulate::CP"] = sigma;
+    (*m.channel)[   "add_noise::CP"  ] = sigma;
+    (*m.modem  )[  "demodulate::CP"  ] = sigma;
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
@@ -149,7 +147,7 @@ int main(int argc, char** argv)
         // display the performance (BER and FER) in the terminal
         u.terminal->final_report();
 
-        // reset the monitor and the terminal for the next SNR
+        // reset the monitors for the next SNR
         u.monitor_red->reset();
     }
 
@@ -204,6 +202,7 @@ void init_modules(const params &p, modules &m)
 
 void init_utils(const params &p, const modules &m, utils &u)
 {
+    // create a sequence, automatically replicated on 4 `p.n_threads` threads
     u.sequence = std::unique_ptr<spu::runtime::Sequence>(new spu::runtime::Sequence((*m.source)("generate"),
         p.n_threads ? p.n_threads : 1));
     // allocate a common monitor module to reduce all the monitors

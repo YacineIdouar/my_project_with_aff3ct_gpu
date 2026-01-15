@@ -42,6 +42,9 @@ void init_utils(const modules &m, utils &u);
 
 int main(int argc, char** argv)
 {
+    // StreamPU will catch and manage sigint
+    spu::tools::Signal_handler::init();
+
     // enable auto allocation of the output socket which is not the default now, because the allocation are made in
     // the sequence (BUT there is no sequence here)
     spu::tools::Buffer_allocator::set_task_autoalloc(true);
@@ -65,7 +68,6 @@ int main(int argc, char** argv)
     u.terminal->legend();
 
     // sockets binding (connect the sockets of the tasks = fill the input sockets with the output sockets)
-    using namespace module;
     (*m.encoder)[      "encode::U_K" ] = (*m.source )[   "generate::out_data"];
     (*m.modem  )[    "modulate::X_N1"] = (*m.encoder)[     "encode::X_N"     ];
     (*m.channel)[   "add_noise::X_N" ] = (*m.modem  )[   "modulate::X_N2"    ];
@@ -73,10 +75,9 @@ int main(int argc, char** argv)
     (*m.decoder)[ "decode_siho::Y_N" ] = (*m.modem  )[ "demodulate::Y_N2"    ];
     (*m.monitor)["check_errors::U"   ] = (*m.source )[   "generate::out_data"];
     (*m.monitor)["check_errors::V"   ] = (*m.decoder)["decode_siho::V_K"     ];
-
     std::vector<float> sigma(1);
-    (*m.channel)[ "add_noise::CP"] = sigma;
-    (*m.modem  )["demodulate::CP"] = sigma;
+    (*m.channel)[   "add_noise::CP"  ] = sigma;
+    (*m.modem  )[  "demodulate::CP"  ] = sigma;
 
     // loop over the various SNRs
     for (auto ebn0 = p.ebn0_min; ebn0 < p.ebn0_max; ebn0 += p.ebn0_step)
@@ -95,12 +96,12 @@ int main(int argc, char** argv)
         {
             // it is important to use enumerate (instead strings) to get the tasks for performance reasons
             (*m.source )[spu::module::src::tsk::generate    ].exec();
-            (*m.encoder)[             enc::tsk::encode      ].exec();
-            (*m.modem  )[             mdm::tsk::modulate    ].exec();
-            (*m.channel)[             chn::tsk::add_noise   ].exec();
-            (*m.modem  )[             mdm::tsk::demodulate  ].exec();
-            (*m.decoder)[             dec::tsk::decode_siho ].exec();
-            (*m.monitor)[             mnt::tsk::check_errors].exec();
+            (*m.encoder)[     module::enc::tsk::encode      ].exec();
+            (*m.modem  )[     module::mdm::tsk::modulate    ].exec();
+            (*m.channel)[     module::chn::tsk::add_noise   ].exec();
+            (*m.modem  )[     module::mdm::tsk::demodulate  ].exec();
+            (*m.decoder)[     module::dec::tsk::decode_siho ].exec();
+            (*m.monitor)[     module::mnt::tsk::check_errors].exec();
         }
 
         // reset sigint if previously triggered
@@ -110,7 +111,7 @@ int main(int argc, char** argv)
         // display the performance (BER and FER) in the terminal
         u.terminal->final_report();
 
-        // reset the monitor and the terminal for the next SNR
+        // reset the monitor for the next SNR
         m.monitor->reset();
     }
 

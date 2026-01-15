@@ -53,6 +53,7 @@ void init_utils(const modules &m, utils &u);
 
 int main(int argc, char** argv)
 {
+    // StreamPU will catch and manage sigint
     spu::tools::Signal_handler::init();
 
     // get the AFF3CT version

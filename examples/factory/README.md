@@ -9,7 +9,7 @@ Compile the code on Linux/MacOS/MinGW/WSL:
 ```bash
 mkdir build
 cd build
-cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-funroll-loops -march=native" \
+cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-Wall -funroll-loops -march=native" \
          -DAFF3CT_DIR=$(pwd)/../../../aff3ct_install/lib/cmake/aff3ct \
          -Dcpptrace_DIR=$(pwd)/../../../aff3ct_install/lib/cmake/cpptrace
 cmake --build . -j 1

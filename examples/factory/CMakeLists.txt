@@ -22,7 +22,7 @@ find_package(Threads REQUIRED)
 find_package(cpptrace CONFIG 0.4.1)
 
 # Find AFF3CT library
-find_package(AFF3CT CONFIG 4.1.0 REQUIRED)
+find_package(AFF3CT CONFIG 4.1.1 REQUIRED)
 
 # Link with AFF3CT static library (note that it is also possible to link with
 # the shared library with the `aff3ct::aff3ct-shared-lib` target)
