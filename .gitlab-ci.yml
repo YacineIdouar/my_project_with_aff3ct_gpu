@@ -116,6 +116,8 @@ build-windows-gcc:
   tags:
     - x86_64
     - windows
+  rules:
+    - if: $CI_MPWA_RUNNERS_WINDOWS == "ON"
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
   artifacts:
@@ -139,6 +141,8 @@ build-windows-msvc:
   tags:
     - x86_64
     - windows
+  rules:
+    - if: $CI_MPWA_RUNNERS_WINDOWS == "ON"
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
   artifacts:
@@ -161,6 +165,8 @@ build-macos-clang:
   tags:
     - x86_64
     - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
   artifacts:
@@ -303,6 +309,8 @@ test-macos-run-bootstrap:
    - x86_64
    - sse4.2
    - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   needs:
     - job: build-macos-clang
       artifacts: true
@@ -315,6 +323,8 @@ test-macos-run-tasks:
    - x86_64
    - sse4.2
    - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   needs:
     - job: build-macos-clang
       artifacts: true
@@ -327,6 +337,8 @@ test-macos-run-factory:
    - x86_64
    - sse4.2
    - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   needs:
     - job: build-macos-clang
       artifacts: true
@@ -339,6 +351,8 @@ test-macos-run-sequence:
    - x86_64
    - sse4.2
    - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   needs:
     - job: build-macos-clang
       artifacts: true
@@ -363,6 +377,8 @@ test-macos-run-turbo-decoder:
    - x86_64
    - sse4.2
    - macos
+  rules:
+    - if: $CI_MPWA_RUNNERS_MACOS == "ON"
   needs:
     - job: build-macos-clang
       artifacts: true
