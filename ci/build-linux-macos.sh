@@ -39,7 +39,7 @@ fi
 cd lib/aff3ct
 mkdir $BUILD
 cd $BUILD
-cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$CFLAGS" \
+cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="$CFLAGS" \
          -DCMAKE_EXE_LINKER_FLAGS="$LFLAGS" -DAFF3CT_COMPILE_EXE="OFF" -DAFF3CT_COMPILE_STATIC_LIB="ON"
 rc=$?; if [[ $rc != 0 ]]; then exit $rc; fi
 cmake --build . -j $THREADS
@@ -56,7 +56,7 @@ for example in ${EXAMPLES[*]}; do
 	cd $example
 	mkdir $BUILD
 	cd $BUILD
-	cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$CFLAGS" \
+	cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="$CFLAGS" \
 	         -DCMAKE_EXE_LINKER_FLAGS="$LFLAGS" -DAFF3CT_DIR=$(pwd)/../../../aff3ct_install/lib/cmake/aff3ct \
              -Dcpptrace_DIR=$(pwd)/../../../aff3ct_install/lib/cmake/cpptrace
 	rc=$?; if [[ $rc != 0 ]]; then exit $rc; fi
