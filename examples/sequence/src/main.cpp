@@ -11,6 +11,7 @@
 #include <random>
 
 #include <aff3ct.hpp>
+#include "Decoder_LDPC_BP_flooding_cuda.hpp"
 using namespace aff3ct;
 
 // #define STEP_BY_STEP
@@ -18,21 +19,23 @@ using namespace aff3ct;
 struct params
 {
 #ifndef STEP_BY_STEP
-    size_t n_threads = std::thread::hardware_concurrency();
+    size_t n_threads = 6;
 #else
     size_t n_threads = 1;
 #endif
     float  ebn0_min  =  0.00f; // minimum SNR value
-    float  ebn0_max  = 10.01f; // maximum SNR value
-    float  ebn0_step =  1.00f; // SNR step
+    float  ebn0_max  =  4.01f; // maximum SNR value
+    float  ebn0_step =  0.50f; // SNR step
     float  R;                  // code rate (R=K/N)
 
     std::unique_ptr<factory::Source          > source;
-    std::unique_ptr<factory::Codec_repetition> codec;
+    std::unique_ptr<factory::Codec_LDPC      > codec;
     std::unique_ptr<factory::Modem           > modem;
     std::unique_ptr<factory::Channel         > channel;
     std::unique_ptr<factory::Monitor_BFER    > monitor;
     std::unique_ptr<factory::Terminal        > terminal;
+	std::unique_ptr<factory::Puncturer       > puncturer;
+	std::unique_ptr<factory::Quantizer       > quantizer;
 };
 void init_params(int argc, char** argv, params &p);
 
@@ -42,9 +45,11 @@ struct modules
     std::unique_ptr<     module::Modem<>>        modem;
     std::unique_ptr<     module::Channel<>>      channel;
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
-    std::unique_ptr<     tools ::Codec_SIHO<>>   codec;
+    std::unique_ptr<     tools ::Codec_LDPC<>>   codec;
                          module::Encoder<>*      encoder;
-                         module::Decoder_SIHO<>* decoder;
+                         module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>* decoder;
+	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
+	std::unique_ptr<     module::Quantizer_pow2_fast<float, int8_t>> quantizer;
 };
 void init_modules(const params &p, modules &m);
 
@@ -66,6 +71,7 @@ int main(int argc, char** argv)
 {
     // StreamPU will catch and manage sigint
     spu::tools::Signal_handler::init();
+	spu::Devices_manager::explore_gpu_devices();
 
     // get the AFF3CT version
     const std::string v = "v" + std::to_string(tools::version_major()) + "." +
@@ -82,13 +88,16 @@ int main(int argc, char** argv)
     modules m; init_modules(p, m         ); // create and initialize the modules
 
     // sockets binding (connect the sockets of the tasks = fill the input sockets with the output sockets)
-    (*m.encoder)[      "encode::U_K" ] = (*m.source )[   "generate::out_data"];
-    (*m.modem  )[    "modulate::X_N1"] = (*m.encoder)[     "encode::X_N"     ];
-    (*m.channel)[   "add_noise::X_N" ] = (*m.modem  )[   "modulate::X_N2"    ];
-    (*m.modem  )[  "demodulate::Y_N1"] = (*m.channel)[  "add_noise::Y_N"     ];
-    (*m.decoder)[ "decode_siho::Y_N" ] = (*m.modem  )[ "demodulate::Y_N2"    ];
-    (*m.monitor)["check_errors::U"   ] = (*m.source )[   "generate::out_data"];
-    (*m.monitor)["check_errors::V"   ] = (*m.decoder)["decode_siho::V_K"     ];
+    (*m.encoder)[      "encode::U_K" ]      = (*m.source )[   "generate::out_data"];
+	(*m.puncturer)[      "puncture::X_N1" ] = (*m.encoder)[     "encode::X_N"     ];
+    (*m.modem  )[    "modulate::X_N1"]      = (*m.puncturer)[      "puncture::X_N2" ];
+    (*m.channel)[   "add_noise::X_N" ]      = (*m.modem  )[   "modulate::X_N2"    ];
+    (*m.modem  )[  "demodulate::Y_N1"]      = (*m.channel)[  "add_noise::Y_N"     ];
+	(*m.puncturer)[    "depuncture::Y_N1" ]  = (*m.modem  )[ "demodulate::Y_N2"    ];
+	(*m.quantizer)[      "process::Y_N1" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
+    (*m.decoder)[ "decode_siho_cuda::Y_N" ] =  (*m.quantizer)[      "process::Y_N2" ];
+    (*m.monitor)["check_errors::U"   ]      = (*m.source )[   "generate::out_data"];
+    (*m.monitor)["check_errors::V"   ]      = (*m.decoder)["decode_siho_cuda::V_K" ];
     std::vector<float> sigma(1);
     (*m.channel)[   "add_noise::CP"  ] = sigma;
     (*m.modem  )[  "demodulate::CP"  ] = sigma;
@@ -162,14 +171,16 @@ int main(int argc, char** argv)
 void init_params(int argc, char** argv, params &p)
 {
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
-    p.codec    = std::unique_ptr<factory::Codec_repetition>(new factory::Codec_repetition());
+    p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
     p.modem    = std::unique_ptr<factory::Modem           >(new factory::Modem           ());
     p.channel  = std::unique_ptr<factory::Channel         >(new factory::Channel         ());
     p.monitor  = std::unique_ptr<factory::Monitor_BFER    >(new factory::Monitor_BFER    ());
     p.terminal = std::unique_ptr<factory::Terminal        >(new factory::Terminal        ());
+	p.puncturer = std::unique_ptr<factory::Puncturer      >(new factory::Puncturer       ());
+	p.quantizer = std::unique_ptr<factory::Quantizer      >(new factory::Quantizer       ());
 
-    std::vector<factory::Factory*> params_list = { p.source .get(), p.codec  .get(), p.modem   .get(),
-                                                   p.channel.get(), p.monitor.get(), p.terminal.get() };
+    std::vector<factory::Factory*> params_list = { p.source .get(), p.codec  .get(), p.puncturer .get(), p.modem   .get(),
+                                                   p.channel.get(), p.monitor.get(), p.terminal.get(), p.quantizer.get() };
 
     // parse the command for the given parameters and fill them
     tools::Command_parser cp(argc, argv, params_list, true);
@@ -186,18 +197,22 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
-    p.R = (float)p.codec->enc->K / (float)p.codec->enc->N_cw; // compute the code rate
+    p.R = (float)p.codec->enc->K / (float)p.puncturer->N; // compute the code rate
 }
 
 void init_modules(const params &p, modules &m)
 {
-    m.source  = std::unique_ptr<spu::module::Source      <>>(p.source ->build());
-    m.codec   = std::unique_ptr<     tools ::Codec_SIHO  <>>(p.codec  ->build());
-    m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
-    m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
-    m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
+    m.source  = std::unique_ptr<spu::module::Source      <>> (p.source ->build());
+    m.codec   = std::unique_ptr<     tools ::Codec_LDPC  <>> (p.codec  ->build());
+	m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
+    m.channel = std::unique_ptr<     module::Channel     <>> (p.channel->build());
+    m.monitor = std::unique_ptr<     module::Monitor_BFER<>> (p.monitor->build());
     m.encoder = &m.codec->get_encoder();
-    m.decoder = &m.codec->get_decoder_siho();
+    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
+	
+	std::vector<bool> pct_pattern;
+    m.puncturer = std::unique_ptr<module::Puncturer_5G<>> (new module::Puncturer_5G <int, float> (p.puncturer.get()->K, p.puncturer.get()->N,  p.codec->enc.get()->N_cw,  pct_pattern));
+    m.quantizer = std::unique_ptr<module::Quantizer_pow2_fast<float, int8_t>> (new module::Quantizer_pow2_fast<float, int8_t>(p.codec->enc.get()->N_cw, 3));
 }
 
 void init_utils(const params &p, const modules &m, utils &u)
