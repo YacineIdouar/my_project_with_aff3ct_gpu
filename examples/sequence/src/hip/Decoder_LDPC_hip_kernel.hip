@@ -8,13 +8,13 @@ its gpu-side pointer fields (cn, vn, cn_degree, vn_degree, cn_stride, vn_stride)
 are populated once during init and reused on every decode call.
 */
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <cstdio>
 #include <unistd.h>
 #include <stdint.h>
 #include <iostream>
 
-#include "Decoder_LDPC_cuda_kernel.hpp"
+#include "Decoder_LDPC_hip_kernel.hpp"
 #include "ldpc_tables_bg1.hpp"
 #include "ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
@@ -42,22 +42,22 @@ static bool              g_initialized = false;
 // ---------------------------------------------------------------------------
 // Thread context (one per OS thread)
 // ---------------------------------------------------------------------------
-struct ThreadContext {
-    cudaStream_t       stream              = 0;
+struct ThreadContext_hip {
+    hipStream_t       stream              = 0;
     int8_t*            llr_in_buffer       = nullptr;
     int*           llr_bits_out_buffer = nullptr;
     uint32_t*          syndrome_buffer     = nullptr;
     llr_msg_t*         llr_msg_buffer      = nullptr;
     llr_accumulator_t* llr_total_buffer    = nullptr;
-    ThreadContext*     next                = nullptr;
+    ThreadContext_hip*     next                = nullptr;
 };
-static __thread ThreadContext thread_ctx = {};
-static ThreadContext* all_contexts = nullptr;
+static __thread ThreadContext_hip thread_ctx = {};
+static ThreadContext_hip* all_contexts = nullptr;
 
-#define CHECK_CUDA(call) do { \
-    cudaError_t _e = (call); \
-    if (_e) printf("CUDA error %d: %s at %s:%d\n", (int)_e, \
-                   cudaGetErrorString(_e), __FILE__, __LINE__); \
+#define CHECK_hip(call) do { \
+    hipError_t _e = (call); \
+    if (_e) printf("hip error %d: %s at %s:%d\n", (int)_e, \
+                   hipGetErrorString(_e), __FILE__, __LINE__); \
 } while(0)
 
 // ---------------------------------------------------------------------------
@@ -362,21 +362,21 @@ static void upload_tables(Std_5G_base_graph& bg) {
 
     uint32_t* tmp;
 
-    CHECK_CUDA(cudaMalloc(&tmp, sz_cn_degree[b][ils]));
-    CHECK_CUDA(cudaMemcpy(tmp, h_cn_degree[b][ils], sz_cn_degree[b][ils], cudaMemcpyHostToDevice));
+    CHECK_hip(hipMalloc(&tmp, sz_cn_degree[b][ils]));
+    CHECK_hip(hipMemcpy(tmp, h_cn_degree[b][ils], sz_cn_degree[b][ils], hipMemcpyHostToDevice));
     bg.cn_degree = tmp;
 
-    CHECK_CUDA(cudaMalloc(&tmp, sz_vn_degree[b][ils]));
-    CHECK_CUDA(cudaMemcpy(tmp, h_vn_degree[b][ils], sz_vn_degree[b][ils], cudaMemcpyHostToDevice));
+    CHECK_hip(hipMalloc(&tmp, sz_vn_degree[b][ils]));
+    CHECK_hip(hipMemcpy(tmp, h_vn_degree[b][ils], sz_vn_degree[b][ils], hipMemcpyHostToDevice));
     bg.vn_degree = tmp;
 
-    CHECK_CUDA(cudaMalloc(&tmp, sz_cn[b][ils]));
-    CHECK_CUDA(cudaMemcpy(tmp, h_cn[b][ils], sz_cn[b][ils], cudaMemcpyHostToDevice));
+    CHECK_hip(hipMalloc(&tmp, sz_cn[b][ils]));
+    CHECK_hip(hipMemcpy(tmp, h_cn[b][ils], sz_cn[b][ils], hipMemcpyHostToDevice));
     bg.cn        = tmp;
     bg.cn_stride = sz_cn[b][ils] / (sizeof(uint32_t) * bg.num_rows);
 
-    CHECK_CUDA(cudaMalloc(&tmp, sz_vn[b][ils]));
-    CHECK_CUDA(cudaMemcpy(tmp, h_vn[b][ils], sz_vn[b][ils], cudaMemcpyHostToDevice));
+    CHECK_hip(hipMalloc(&tmp, sz_vn[b][ils]));
+    CHECK_hip(hipMemcpy(tmp, h_vn[b][ils], sz_vn[b][ils], hipMemcpyHostToDevice));
     bg.vn        = tmp;
     bg.vn_stride = sz_vn[b][ils] / (sizeof(uint32_t) * bg.num_cols);
 }
@@ -385,7 +385,7 @@ static void upload_tables(Std_5G_base_graph& bg) {
 // ldpc_decoder_init_context — per-thread working buffer allocation.
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
-static ThreadContext& ldpc_decoder_init_context(int make_stream) {
+static ThreadContext_hip& sp_hip::ldpc_decoder_init_context(int make_stream) {
     auto& ctx = thread_ctx;
     if (ctx.llr_in_buffer) return ctx;
 
@@ -394,29 +394,29 @@ static ThreadContext& ldpc_decoder_init_context(int make_stream) {
 
     if (make_stream) {
         int hi = 0;
-        cudaDeviceGetStreamPriorityRange(nullptr, &hi);
-        CHECK_CUDA(cudaStreamCreateWithPriority(&ctx.stream, cudaStreamNonBlocking, hi));
+        hipDeviceGetStreamPriorityRange(nullptr, &hi);
+        CHECK_hip(hipStreamCreateWithPriority(&ctx.stream, hipStreamNonBlocking, hi));
     }
 
-    CHECK_CUDA(cudaHostAlloc(&ctx.llr_in_buffer,
+    CHECK_hip(hipHostAlloc(&ctx.llr_in_buffer,
                num_vns * sizeof(int8_t),
-               cudaHostAllocMapped | cudaHostAllocWriteCombined));
+               hipHostAllocMapped | hipHostAllocWriteCombined));
 
-    CHECK_CUDA(cudaHostAlloc(&ctx.llr_bits_out_buffer,
+    CHECK_hip(hipHostAlloc(&ctx.llr_bits_out_buffer,
                (g_bg.K_LDPC) * sizeof(int),
-               cudaHostAllocMapped));
+               hipHostAllocMapped));
 
-    CHECK_CUDA(cudaHostAlloc(&ctx.syndrome_buffer,
+    CHECK_hip(hipHostAlloc(&ctx.syndrome_buffer,
                (num_cns / 32) * sizeof(uint32_t),
-               cudaHostAllocMapped));
+               hipHostAllocMapped));
 
-    CHECK_CUDA(cudaMalloc(&ctx.llr_msg_buffer,
+    CHECK_hip(hipMalloc(&ctx.llr_msg_buffer,
                g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
 
-    CHECK_CUDA(cudaMalloc(&ctx.llr_total_buffer,
+    CHECK_hip(hipMalloc(&ctx.llr_total_buffer,
                num_vns * sizeof(llr_accumulator_t)));
 
-    ThreadContext* self = &ctx;
+    ThreadContext_hip* self = &ctx;
     __atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
 
     return ctx;
@@ -431,9 +431,9 @@ static ThreadContext& ldpc_decoder_init_context(int make_stream) {
 //   2. upload_tables(g_bg)        — fills cn/vn/cn_degree/vn_degree + strides
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
-ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream) {
+ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
     if (g_initialized)
-        return &ldpc_decoder_init_context(make_stream);
+        return &sp_hip::ldpc_decoder_init_context(make_stream);
 
     // Delegate all BG selection and Zc resolution to your helper.
     // Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -447,7 +447,7 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream) {
     upload_tables(g_bg);
 
     g_initialized = true;
-    return &ldpc_decoder_init_context(make_stream);
+    return &sp_hip::ldpc_decoder_init_context(make_stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -457,15 +457,15 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream) {
 //   - BG and Z are gone (read from g_bg)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
-uint32_t sp_cuda::ldpc_decode(
+uint32_t sp_hip::ldpc_decode(
         int8_t const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
         uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
         uint32_t       num_iter,
         uint32_t       perform_syndrome_check,
         int*       llr_bits_out)
 {
-    auto& ctx = ldpc_decoder_init_context(0);
-    cudaStream_t stream = ctx.stream;
+    auto& ctx = sp_hip::ldpc_decoder_init_context(0);
+    hipStream_t stream = ctx.stream;
 
     const uint32_t Zc      = g_bg.Zc;
     const uint32_t num_vns = g_bg.num_cols * Zc;
@@ -497,7 +497,7 @@ uint32_t sp_cuda::ldpc_decode(
     hard_decision_kernel<<<blocks_for(K, PACK_BITS_THREADS), PACK_BITS_THREADS, 0, stream>>>(
         llr_total, ctx.llr_bits_out_buffer, K);
 
-    cudaStreamSynchronize(stream);
+    hipStreamSynchronize(stream);
     memcpy(llr_bits_out, ctx.llr_bits_out_buffer, num_out_bytes * sizeof(int));
 
     if (perform_syndrome_check) {
@@ -507,7 +507,7 @@ uint32_t sp_cuda::ldpc_decode(
             g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
             g_bg.num_rows);
 
-        cudaStreamSynchronize(stream);
+        hipStreamSynchronize(stream);
 
         for (uint32_t i = 0; i < num_cns / 32; ++i)
             if (ctx.syndrome_buffer[i] != 0)
@@ -520,26 +520,26 @@ uint32_t sp_cuda::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_cuda::ldpc_decoder_shutdown() {
-    cudaDeviceSynchronize();
+void sp_hip::ldpc_decoder_shutdown() {
+    hipDeviceSynchronize();
 
-    ThreadContext* ctx = nullptr;
+    ThreadContext_hip* ctx = nullptr;
     __atomic_exchange(&all_contexts, &ctx, &ctx, __ATOMIC_ACQ_REL);
     while (ctx) {
-        cudaFreeHost(ctx->llr_in_buffer);
-        cudaFreeHost(ctx->llr_bits_out_buffer);
-        cudaFreeHost(ctx->syndrome_buffer);
-        cudaFree(ctx->llr_msg_buffer);
-        cudaFree(ctx->llr_total_buffer);
-        if (ctx->stream) cudaStreamDestroy(ctx->stream);
+        hipFreeHost(ctx->llr_in_buffer);
+        hipFreeHost(ctx->llr_bits_out_buffer);
+        hipFreeHost(ctx->syndrome_buffer);
+        hipFree(ctx->llr_msg_buffer);
+        hipFree(ctx->llr_total_buffer);
+        if (ctx->stream) hipStreamDestroy(ctx->stream);
         ctx = ctx->next;
     }
 
     // Free the four GPU table allocations stored in g_bg
-    cudaFree(const_cast<uint32_t*>(g_bg.cn_degree));
-    cudaFree(const_cast<uint32_t*>(g_bg.vn_degree));
-    cudaFree(const_cast<uint32_t*>(g_bg.cn));
-    cudaFree(const_cast<uint32_t*>(g_bg.vn));
+    hipFree(const_cast<uint32_t*>(g_bg.cn_degree));
+    hipFree(const_cast<uint32_t*>(g_bg.vn_degree));
+    hipFree(const_cast<uint32_t*>(g_bg.cn));
+    hipFree(const_cast<uint32_t*>(g_bg.vn));
 
     g_initialized = false;
     g_bg = {};

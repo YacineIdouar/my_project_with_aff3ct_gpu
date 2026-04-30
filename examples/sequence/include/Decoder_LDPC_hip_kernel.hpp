@@ -5,8 +5,8 @@
 #include "ldpc_tables_bg2.hpp"
 
 
-struct ThreadContext;
-namespace sp_cuda
+struct ThreadContext_hip;
+namespace sp_hip
 {
 	/*
  * ldpc_decoder_init
@@ -17,14 +17,14 @@ namespace sp_cuda
  *
  * K           - number of information bits
  * N           - codeword length (coded bits)
- * make_stream - if non-zero, creates a dedicated high-priority CUDA stream
+ * make_stream - if non-zero, creates a dedicated high-priority hip stream
  *               for this thread; otherwise the caller must supply a stream
  *               to every ldpc_decode() call
  *
  * Returns a pointer to the thread-local context, or throws
  * std::invalid_argument (via aff3ct) on an invalid (K, N) pair.
  */
-ThreadContext* ldpc_decoder_init(int K, int N, int make_stream);
+ThreadContext_hip* ldpc_decoder_init(int K, int N, int make_stream);
 
 /*
  * ldpc_decode
@@ -34,7 +34,7 @@ ThreadContext* ldpc_decoder_init(int K, int N, int make_stream);
  *
  * context_               - context returned by ldpc_decoder_init();
  *                          if NULL a thread-local context is created lazily
- * stream                 - CUDA stream to enqueue work on;
+ * stream                 - hip stream to enqueue work on;
  *                          if 0 and context_ is non-NULL, uses context_->stream
  * llr_in                 - input channel LLRs, num_cols * Zc signed bytes
  * llr_total_out          - output soft LLRs after decoding, num_cols * Zc
