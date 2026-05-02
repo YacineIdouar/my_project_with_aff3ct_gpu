@@ -63,8 +63,8 @@ static ThreadContext_hip* all_contexts = nullptr;
 // ---------------------------------------------------------------------------
 // Kernel configuration
 // ---------------------------------------------------------------------------
-#define NODE_KERNEL_BLOCK 128
-#define UNROLL_NODES      1
+static constexpr uint32_t NODE_KERNEL_BLOCK = 128;
+static constexpr uint32_t PACK_BITS_THREADS = 256;
 
 inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
     return (n + bs - 1) / bs;
