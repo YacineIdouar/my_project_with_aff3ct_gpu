@@ -70,12 +70,6 @@ inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
     return (n + bs - 1) / bs;
 }
 
-// ---------------------------------------------------------------------------
-// update_cn_kernel
-// Uses Std_5G_base_graph fields directly: num_rows, cn, cn_degree, cn_stride.
-// Zc passed as a plain uint32_t (resolved once, stored in g_bg.Zc).
-// ---------------------------------------------------------------------------
-__launch_bounds__(UNROLL_NODES * NODE_KERNEL_BLOCK, 3)
 static __global__ void update_cn_kernel(
         llr_accumulator_t const* __restrict__ llr_total,
         llr_msg_t*               __restrict__ llr_msg,
@@ -92,15 +86,16 @@ static __global__ void update_cn_kernel(
 
     if (idx_row >= num_rows) return;
 
-    const uint32_t cn_degree    = bg_cn_degree[idx_row];
-    uint32_t const* check_nodes = &bg_cn[idx_row * cn_stride];
+    const uint32_t  cn_degree    = bg_cn_degree[idx_row];
+    uint32_t const* check_nodes  = &bg_cn[idx_row * cn_stride];
 
     int      min_1     = INT_MAX;
     int      min_2     = INT_MAX;
     int      idx_min   = -1;
     uint32_t msg_signs = 0;
 
-    for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) {
+    // First pass: find two smallest magnitudes and accumulate signs
+    for (uint32_t ii = 0; ii < cn_degree; ++ii) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
         uint32_t s          = cn >> 16;
@@ -109,12 +104,12 @@ static __global__ void update_cn_kernel(
 
         int t = llr_total[idx_col * Zc + (i + s) % Zc];
         if (!first_iter)
-            t -= __ldg(&llr_msg[msg_idx]);
+            t -= llr_msg[msg_idx];   // plain load — no __ldg needed on GCN
 
-        msg_signs |= (t < 0) << ii;
+        if (t < 0) msg_signs |= (1u << ii);
 
         int t_abs = abs(t);
-        if (t_abs < min_1) { min_2 = min_1; min_1 = t_abs; idx_min = msg_idx; }
+        if (t_abs < min_1) { min_2 = min_1; min_1 = t_abs; idx_min = (int)msg_idx; }
         else if (t_abs < min_2) min_2 = t_abs;
     }
 
@@ -123,27 +118,31 @@ static __global__ void update_cn_kernel(
     min_1 = min(max(APPLY_DAMPING_INT(min_1), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
     min_2 = min(max(APPLY_DAMPING_INT(min_2), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
 
-    for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) {
+    // Second pass: write outgoing messages
+    for (uint32_t ii = 0; ii < cn_degree; ++ii) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
         uint32_t msg_offset = idx_row + idx_col * num_rows;
         uint32_t msg_idx    = msg_offset * Zc + i;
 
-        int min_val  = (msg_idx == (uint32_t)idx_min) ? min_2 : min_1;
-        int msg_sign = ((msg_signs >> ii) & 1) ? -1 : 1;
+        int min_val  = ((int)msg_idx == idx_min) ? min_2 : min_1;
+        int msg_sign = ((msg_signs >> ii) & 1u) ? -1 : 1;
 
         llr_msg[msg_idx] = llr_msg_t(min_val * node_sign * msg_sign);
     }
 }
 
 // ---------------------------------------------------------------------------
-// update_vn_kernel
+// update_vn_kernel  (variable-node update)
+//
+// One thread per (col, z-index) pair.
+// All three __syncwarp() calls removed: msg_sum is a private register,
+// threadIdx.y is always 0, and the final write index is unique per thread.
 // ---------------------------------------------------------------------------
-__launch_bounds__(UNROLL_NODES * NODE_KERNEL_BLOCK, 3)
 static __global__ void update_vn_kernel(
-        llr_msg_t const*         __restrict__ llr_msg,
-        int8_t const*            __restrict__ llr_ch,
-        llr_accumulator_t*       __restrict__ llr_total,
+        llr_msg_t const*   __restrict__ llr_msg,
+        int8_t const*      __restrict__ llr_ch,
+        llr_accumulator_t* __restrict__ llr_total,
         uint32_t Zc,
         uint32_t const* __restrict__ bg_vn,
         uint32_t const* __restrict__ bg_vn_degree,
@@ -157,11 +156,11 @@ static __global__ void update_vn_kernel(
 
     if (idx_col >= num_cols) return;
 
-    const uint32_t vn_degree       = bg_vn_degree[idx_col];
-    uint32_t const* variable_nodes = &bg_vn[idx_col * vn_stride];
+    const uint32_t  vn_degree       = bg_vn_degree[idx_col];
+    uint32_t const* variable_nodes  = &bg_vn[idx_col * vn_stride];
 
     int msg_sum = 0;
-    for (uint32_t j = threadIdx.y; j < vn_degree; j += UNROLL_NODES) {
+    for (uint32_t j = 0; j < vn_degree; ++j) {
         uint32_t vn         = variable_nodes[j];
         uint32_t idx_row    = vn & 0xffffu;
         uint32_t s          = vn >> 16;
@@ -170,54 +169,21 @@ static __global__ void update_vn_kernel(
         msg_sum += llr_msg[msg_idx];
     }
 
-    if (threadIdx.y == 0)
-        msg_sum += llr_ch[idx_col * Zc + i];
-
-    msg_sum = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
+    msg_sum += llr_ch[idx_col * Zc + i];
+    msg_sum  = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
 
     llr_total[idx_col * Zc + i] = llr_accumulator_t(msg_sum);
 }
 
 // ---------------------------------------------------------------------------
-// pack_bits_kernel
+// hard_decision_kernel
 // ---------------------------------------------------------------------------
-static constexpr uint32_t PACK_BITS_THREADS = 256;
-
-//__launch_bounds__(PACK_BITS_THREADS, 6)
-//static __global__ void pack_bits_kernel(
-//        llr_accumulator_t const* __restrict__ llr_total,
-//        uint8_t*                 __restrict__ bits,
-//        uint32_t block_length)
-//{
-//    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-//
-//    uint32_t coop_byte = 0;
-//    if (tid < block_length)
-//        coop_byte = (llr_total[tid] < 0) << (7 - (threadIdx.x & 7));
-//
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 1);
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 2);
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 4);
-//
-//    __shared__ uint32_t shared_bits[PACK_BITS_THREADS / 8];
-//    if ((threadIdx.x & 7) == 0)
-//        shared_bits[threadIdx.x / 8] = coop_byte;
-//
-//    __syncthreads();
-//
-//    if (threadIdx.x < PACK_BITS_THREADS / 8 &&
-//        blockIdx.x * PACK_BITS_THREADS + threadIdx.x * 8 < block_length)
-//        bits[blockIdx.x * PACK_BITS_THREADS / 8 + threadIdx.x] = shared_bits[threadIdx.x];
-//}
-
-__launch_bounds__(PACK_BITS_THREADS, 6)
 static __global__ void hard_decision_kernel(
-    llr_accumulator_t const* __restrict__ llr_total,
-    int32_t*                 __restrict__ bits,
-    uint32_t block_length)
+        llr_accumulator_t const* __restrict__ llr_total,
+        int32_t*                 __restrict__ bits,
+        uint32_t block_length)
 {
     const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-
     if (tid < block_length)
         bits[tid] = (llr_total[tid] < 0) ? 1 : 0;
 }
