@@ -321,42 +321,44 @@ uint32_t sp_hip::ldpc_decode(
         uint32_t       perform_syndrome_check,
         int*       llr_bits_out)
 {
-    auto& ctx = ldpc_decoder_init_context(0);
+        auto& ctx = ldpc_decoder_init_context(0);
     hipStream_t stream = ctx.stream;
-
+ 
     const uint32_t Zc      = g_bg.Zc;
     const uint32_t num_vns = g_bg.num_cols * Zc;
     const uint32_t num_cns = g_bg.num_rows * Zc;
-
+ 
     memcpy(ctx.llr_in_buffer, llr_in, num_vns * sizeof(int8_t));
-
-    const llr_accumulator_t* llr_total =
+ 
+    const llr_accumulator_t* llr_total = 
         reinterpret_cast<const llr_accumulator_t*>(ctx.llr_in_buffer);
-
-
+ 
     for (uint32_t iter = 0; iter < num_iter; ++iter) {
-        update_cn_kernel<<<blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, stream>>>(
+        update_cn_kernel<<<blocks_for(num_cns, NODE_KERNEL_BLOCK),
+                           NODE_KERNEL_BLOCK, 0, stream>>>(
             llr_total, ctx.llr_msg_buffer,
             Zc,
-            g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
+            g_dev.cn, g_dev.cn_degree, g_dev.cn_stride,
             g_bg.num_rows,
             iter == 0);
-
-        update_vn_kernel<<<blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, stream>>>(
+ 
+        update_vn_kernel<<<blocks_for(num_vns, NODE_KERNEL_BLOCK),
+                           NODE_KERNEL_BLOCK, 0, stream>>>(
             ctx.llr_msg_buffer, ctx.llr_in_buffer, ctx.llr_total_buffer,
             Zc,
-            g_bg.vn, g_bg.vn_degree, g_bg.vn_stride,
+            g_dev.vn, g_dev.vn_degree, g_dev.vn_stride,
             g_bg.num_cols, g_bg.num_rows);
-
+ 
         llr_total = ctx.llr_total_buffer;
     }
+ 
+    hard_decision_kernel<<<blocks_for(K, PACK_BITS_THREADS),
+                           PACK_BITS_THREADS, 0, stream>>>(
+        llr_total, reinterpret_cast<int32_t*>(ctx.llr_bits_out_buffer), K);
+ 
+    CHECK_HIP(hipStreamSynchronize(stream));
+    memcpy(llr_bits_out, ctx.llr_bits_out_buffer, K * sizeof(int));
 
-    const uint32_t num_out_bytes = K;
-    hard_decision_kernel<<<blocks_for(K, PACK_BITS_THREADS), PACK_BITS_THREADS, 0, stream>>>(
-        llr_total, ctx.llr_bits_out_buffer, K);
-
-    hipStreamSynchronize(stream);
-    memcpy(llr_bits_out, ctx.llr_bits_out_buffer, num_out_bytes * sizeof(int));
 
     return num_iter - 1;
 }
