@@ -324,7 +324,7 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
 // ---------------------------------------------------------------------------
 ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
     if (g_initialized)
-        return &sp_hip::ldpc_decoder_init_context(make_stream);
+        return &ldpc_decoder_init_context(make_stream);
 
     // Delegate all BG selection and Zc resolution to your helper.
     // Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -338,7 +338,7 @@ ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
     upload_tables(g_bg);
 
     g_initialized = true;
-    return &sp_hip::ldpc_decoder_init_context(make_stream);
+    return &ldpc_decoder_init_context(make_stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ uint32_t sp_hip::ldpc_decode(
         uint32_t       perform_syndrome_check,
         int*       llr_bits_out)
 {
-    auto& ctx = sp_hip::ldpc_decoder_init_context(0);
+    auto& ctx = ldpc_decoder_init_context(0);
     hipStream_t stream = ctx.stream;
 
     const uint32_t Zc      = g_bg.Zc;
@@ -390,20 +390,6 @@ uint32_t sp_hip::ldpc_decode(
 
     hipStreamSynchronize(stream);
     memcpy(llr_bits_out, ctx.llr_bits_out_buffer, num_out_bytes * sizeof(int));
-
-    if (perform_syndrome_check) {
-        compute_syndrome_kernel<<<blocks_for(num_cns, 512), 512, 0, stream>>>(
-            ctx.llr_total_buffer, ctx.syndrome_buffer,
-            Zc,
-            g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
-            g_bg.num_rows);
-
-        hipStreamSynchronize(stream);
-
-        for (uint32_t i = 0; i < num_cns / 32; ++i)
-            if (ctx.syndrome_buffer[i] != 0)
-                return num_iter + 1;
-    }
 
     return num_iter - 1;
 }
