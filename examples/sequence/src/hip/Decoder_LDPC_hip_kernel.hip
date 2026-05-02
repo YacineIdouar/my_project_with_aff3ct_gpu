@@ -78,18 +78,18 @@ static BgDeviceTables g_dev = {};
 // ---------------------------------------------------------------------------
 // Per-thread context
 // ---------------------------------------------------------------------------
-struct ThreadContext {
+struct ThreadContext_hip {
     hipStream_t        stream              = 0;
     int8_t*            llr_in_buffer       = nullptr;  // pinned host
     int*               llr_bits_out_buffer = nullptr;  // pinned host
     uint32_t*          syndrome_buffer     = nullptr;  // pinned host
     llr_msg_t*         llr_msg_buffer      = nullptr;  // device
     llr_accumulator_t* llr_total_buffer    = nullptr;  // device
-    ThreadContext*     next                = nullptr;
+    ThreadContext_hip*     next                = nullptr;
 };
 
-static __thread ThreadContext thread_ctx  = {};
-static ThreadContext*         all_contexts = nullptr;
+static __thread ThreadContext_hip thread_ctx  = {};
+static ThreadContext_hip*         all_contexts = nullptr;
 
 // ---------------------------------------------------------------------------
 // update_cn_kernel  (min-sum / belief propagation, check-node update)
@@ -264,7 +264,7 @@ static void upload_tables(const Std_5G_base_graph& bg) {
 // ---------------------------------------------------------------------------
 // Per-thread context initialisation
 // ---------------------------------------------------------------------------
-static ThreadContext& ldpc_decoder_init_context(int make_stream) {
+static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     auto& ctx = thread_ctx;
     if (ctx.llr_in_buffer) return ctx;
 
@@ -295,7 +295,7 @@ static ThreadContext& ldpc_decoder_init_context(int make_stream) {
     CHECK_HIP(hipMalloc(&ctx.llr_total_buffer,
               num_vns * sizeof(llr_accumulator_t)));
 
-    ThreadContext* self = &ctx;
+    ThreadContext_hip* self = &ctx;
     __atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
 
     return ctx;
@@ -304,7 +304,7 @@ static ThreadContext& ldpc_decoder_init_context(int make_stream) {
 // ---------------------------------------------------------------------------
 // ldpc_decoder_init
 // ---------------------------------------------------------------------------
-ThreadContext* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
+ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
     if (g_initialized)
         return &ldpc_decoder_init_context(make_stream);
 
@@ -377,7 +377,7 @@ uint32_t sp_hip::ldpc_decode(
 void sp_hip::ldpc_decoder_shutdown() {
     CHECK_HIP(hipDeviceSynchronize());
 
-    ThreadContext* ctx = nullptr;
+    ThreadContext_hip* ctx = nullptr;
     __atomic_exchange(&all_contexts, &ctx, &ctx, __ATOMIC_ACQ_REL);
     while (ctx) {
         CHECK_HIP(hipHostFree(ctx->llr_in_buffer));
