@@ -2,16 +2,23 @@
 SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
-Variant using aff3ct::tools::build_5G_base_graph() for base graph selection.
-The Std_5G_base_graph struct subsumes the original BaseGraph struct entirely —
-its gpu-side pointer fields (cn, vn, cn_degree, vn_degree, cn_stride, vn_stride)
-are populated once during init and reused on every decode call.
+HIP port of Decoder_LDPC_cuda_kernel.cpp
+Changes vs the CUDA original:
+  - All CUDA APIs replaced with HIP equivalents
+  - UNROLL_NODES > 1 path removed entirely (was compile-time dead code at UNROLL_NODES=1)
+  - All __syncwarp() calls removed (redundant at UNROLL_NODES=1, no-op on AMD anyway)
+  - __ldg() replaced with plain dereference (HIP/GCN has no separate texture cache path)
+  - 0xffffffff warp masks widened to 0xffffffffffffffffull (AMD wavefront = 64 lanes on gfx9,
+    32 on gfx10+; using __ballot_sync to derive the active mask avoids the hardcoded assumption)
+  - CHECK_CUDA replaced with CHECK_HIP
+  - __popc replaced with __popcll on 64-bit ballot values
 */
 
 #include <hip/hip_runtime.h>
 #include <cstdio>
-#include <unistd.h>
-#include <stdint.h>
+#include <cstring>
+#include <cstdint>
+#include <climits>
 #include <iostream>
 
 #include "Decoder_LDPC_hip_kernel.hpp"
@@ -22,46 +29,27 @@ are populated once during init and reused on every decode call.
 using namespace aff3ct::tools;
 
 // ---------------------------------------------------------------------------
-// Data types (unchanged)
+// Error-checking macro
+// ---------------------------------------------------------------------------
+#define CHECK_HIP(call) do { \
+    hipError_t _e = (call); \
+    if (_e != hipSuccess) \
+        printf("HIP error %d: %s at %s:%d\n", \
+               (int)_e, hipGetErrorString(_e), __FILE__, __LINE__); \
+} while(0)
+
+// ---------------------------------------------------------------------------
+// Data types
 // ---------------------------------------------------------------------------
 static constexpr int MAX_LLR_ACCUMULATOR_VALUE = 127;
 typedef int8_t llr_accumulator_t;
 static constexpr int MAX_LLR_MSG_VALUE = 127;
 typedef int8_t llr_msg_t;
 
-#define APPLY_DAMPING_INT(x) ((x)*3/4)
+#define APPLY_DAMPING_INT(x) ((x) * 3 / 4)
 
 // ---------------------------------------------------------------------------
-// Single global base graph instance.
-// Populated once by ldpc_decoder_init(), read-only from every decode call.
-// The GPU-side pointer fields (cn, vn, ...) are set here after upload.
-// ---------------------------------------------------------------------------
-static Std_5G_base_graph g_bg = {};
-static bool              g_initialized = false;
-
-// ---------------------------------------------------------------------------
-// Thread context (one per OS thread)
-// ---------------------------------------------------------------------------
-struct ThreadContext_hip {
-    hipStream_t       stream              = 0;
-    int8_t*            llr_in_buffer       = nullptr;
-    int*           llr_bits_out_buffer = nullptr;
-    uint32_t*          syndrome_buffer     = nullptr;
-    llr_msg_t*         llr_msg_buffer      = nullptr;
-    llr_accumulator_t* llr_total_buffer    = nullptr;
-    ThreadContext_hip*     next                = nullptr;
-};
-static __thread ThreadContext_hip thread_ctx = {};
-static ThreadContext_hip* all_contexts = nullptr;
-
-#define CHECK_hip(call) do { \
-    hipError_t _e = (call); \
-    if (_e) printf("hip error %d: %s at %s:%d\n", (int)_e, \
-                   hipGetErrorString(_e), __FILE__, __LINE__); \
-} while(0)
-
-// ---------------------------------------------------------------------------
-// Kernel configuration
+// Kernel configuration — single-row-per-thread, no unrolling
 // ---------------------------------------------------------------------------
 static constexpr uint32_t NODE_KERNEL_BLOCK = 128;
 static constexpr uint32_t PACK_BITS_THREADS = 256;
@@ -70,6 +58,46 @@ inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
     return (n + bs - 1) / bs;
 }
 
+// ---------------------------------------------------------------------------
+// Global base-graph (populated once by ldpc_decoder_init)
+// ---------------------------------------------------------------------------
+static Std_5G_base_graph g_bg          = {};
+static bool              g_initialized = false;
+
+// GPU-side table pointers and strides (mirrors of CUDA version)
+struct BgDeviceTables {
+    uint32_t* cn        = nullptr;
+    uint32_t* vn        = nullptr;
+    uint32_t* cn_degree = nullptr;
+    uint32_t* vn_degree = nullptr;
+    uint32_t  cn_stride = 0;
+    uint32_t  vn_stride = 0;
+};
+static BgDeviceTables g_dev = {};
+
+// ---------------------------------------------------------------------------
+// Per-thread context
+// ---------------------------------------------------------------------------
+struct ThreadContext {
+    hipStream_t        stream              = 0;
+    int8_t*            llr_in_buffer       = nullptr;  // pinned host
+    int*               llr_bits_out_buffer = nullptr;  // pinned host
+    uint32_t*          syndrome_buffer     = nullptr;  // pinned host
+    llr_msg_t*         llr_msg_buffer      = nullptr;  // device
+    llr_accumulator_t* llr_total_buffer    = nullptr;  // device
+    ThreadContext*     next                = nullptr;
+};
+
+static __thread ThreadContext thread_ctx  = {};
+static ThreadContext*         all_contexts = nullptr;
+
+// ---------------------------------------------------------------------------
+// update_cn_kernel  (min-sum / belief propagation, check-node update)
+//
+// One thread per (row, z-index) pair.
+// All __syncwarp() removed: every variable is a private register,
+// there is no shared memory, and no cross-lane dependency.
+// ---------------------------------------------------------------------------
 static __global__ void update_cn_kernel(
         llr_accumulator_t const* __restrict__ llr_total,
         llr_msg_t*               __restrict__ llr_msg,
@@ -174,7 +202,6 @@ static __global__ void update_vn_kernel(
 
     llr_total[idx_col * Zc + i] = llr_accumulator_t(msg_sum);
 }
-
 // ---------------------------------------------------------------------------
 // hard_decision_kernel
 // ---------------------------------------------------------------------------
@@ -189,13 +216,11 @@ static __global__ void hard_decision_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Upload one table variant's four arrays into GPU memory and populate the
-// corresponding pointer + stride fields of the provided base graph struct.
-// Called once from ldpc_decoder_init().
+// Upload tables to device memory
 // ---------------------------------------------------------------------------
-static void upload_tables(Std_5G_base_graph& bg) {
-    // Select the right host-side tables using bg.Bg and bg.index_list
+static void upload_tables(const Std_5G_base_graph& bg) {
     const uint32_t ils = bg.index_list;
+    const uint32_t b   = bg.Bg - 1;
 
     const uint32_t* h_cn_degree[2][8] = { { BG1_CN_DEGREE_TABLE() },
                                            { BG2_CN_DEGREE_TABLE() } };
@@ -215,34 +240,31 @@ static void upload_tables(Std_5G_base_graph& bg) {
     const uint32_t sz_vn[2][8]        = { { BG1_VN_TABLE(sizeof) },
                                            { BG2_VN_TABLE(sizeof) } };
 
-    const uint32_t b = bg.Bg - 1; // 0-indexed
-
     uint32_t* tmp;
 
-    CHECK_hip(hipMalloc(&tmp, sz_cn_degree[b][ils]));
-    CHECK_hip(hipMemcpy(tmp, h_cn_degree[b][ils], sz_cn_degree[b][ils], hipMemcpyHostToDevice));
-    bg.cn_degree = tmp;
+    CHECK_HIP(hipMalloc(&tmp, sz_cn_degree[b][ils]));
+    CHECK_HIP(hipMemcpy(tmp, h_cn_degree[b][ils], sz_cn_degree[b][ils], hipMemcpyHostToDevice));
+    g_dev.cn_degree = tmp;
 
-    CHECK_hip(hipMalloc(&tmp, sz_vn_degree[b][ils]));
-    CHECK_hip(hipMemcpy(tmp, h_vn_degree[b][ils], sz_vn_degree[b][ils], hipMemcpyHostToDevice));
-    bg.vn_degree = tmp;
+    CHECK_HIP(hipMalloc(&tmp, sz_vn_degree[b][ils]));
+    CHECK_HIP(hipMemcpy(tmp, h_vn_degree[b][ils], sz_vn_degree[b][ils], hipMemcpyHostToDevice));
+    g_dev.vn_degree = tmp;
 
-    CHECK_hip(hipMalloc(&tmp, sz_cn[b][ils]));
-    CHECK_hip(hipMemcpy(tmp, h_cn[b][ils], sz_cn[b][ils], hipMemcpyHostToDevice));
-    bg.cn        = tmp;
-    bg.cn_stride = sz_cn[b][ils] / (sizeof(uint32_t) * bg.num_rows);
+    CHECK_HIP(hipMalloc(&tmp, sz_cn[b][ils]));
+    CHECK_HIP(hipMemcpy(tmp, h_cn[b][ils], sz_cn[b][ils], hipMemcpyHostToDevice));
+    g_dev.cn        = tmp;
+    g_dev.cn_stride = sz_cn[b][ils] / (sizeof(uint32_t) * bg.num_rows);
 
-    CHECK_hip(hipMalloc(&tmp, sz_vn[b][ils]));
-    CHECK_hip(hipMemcpy(tmp, h_vn[b][ils], sz_vn[b][ils], hipMemcpyHostToDevice));
-    bg.vn        = tmp;
-    bg.vn_stride = sz_vn[b][ils] / (sizeof(uint32_t) * bg.num_cols);
+    CHECK_HIP(hipMalloc(&tmp, sz_vn[b][ils]));
+    CHECK_HIP(hipMemcpy(tmp, h_vn[b][ils], sz_vn[b][ils], hipMemcpyHostToDevice));
+    g_dev.vn        = tmp;
+    g_dev.vn_stride = sz_vn[b][ils] / (sizeof(uint32_t) * bg.num_cols);
 }
 
 // ---------------------------------------------------------------------------
-// ldpc_decoder_init_context — per-thread working buffer allocation.
-// Buffer sizes are derived from the already-resolved g_bg fields.
+// Per-thread context initialisation
 // ---------------------------------------------------------------------------
-static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
+static ThreadContext& ldpc_decoder_init_context(int make_stream) {
     auto& ctx = thread_ctx;
     if (ctx.llr_in_buffer) return ctx;
 
@@ -250,30 +272,30 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     const uint32_t num_cns = g_bg.num_rows * g_bg.Zc;
 
     if (make_stream) {
-        int hi = 0;
-        hipDeviceGetStreamPriorityRange(nullptr, &hi);
-        CHECK_hip(hipStreamCreateWithPriority(&ctx.stream, hipStreamNonBlocking, hi));
+        int lo = 0, hi = 0;
+        CHECK_HIP(hipDeviceGetStreamPriorityRange(&lo, &hi));
+        CHECK_HIP(hipStreamCreateWithPriority(&ctx.stream, hipStreamNonBlocking, hi));
     }
 
-    CHECK_hip(hipHostAlloc(&ctx.llr_in_buffer,
-               num_vns * sizeof(int8_t),
-               hipHostAllocMapped | hipHostAllocWriteCombined));
+    CHECK_HIP(hipHostMalloc(&ctx.llr_in_buffer,
+              num_vns * sizeof(int8_t),
+              hipHostMallocMapped | hipHostMallocWriteCombined));
 
-    CHECK_hip(hipHostAlloc(&ctx.llr_bits_out_buffer,
-               (g_bg.K_LDPC) * sizeof(int),
-               hipHostAllocMapped));
+    CHECK_HIP(hipHostMalloc(&ctx.llr_bits_out_buffer,
+              g_bg.K_LDPC * sizeof(int),
+              hipHostMallocMapped));
 
-    CHECK_hip(hipHostAlloc(&ctx.syndrome_buffer,
-               (num_cns / 32) * sizeof(uint32_t),
-               hipHostAllocMapped));
+    CHECK_HIP(hipHostMalloc(&ctx.syndrome_buffer,
+              (num_cns / 32) * sizeof(uint32_t),
+              hipHostMallocMapped));
 
-    CHECK_hip(hipMalloc(&ctx.llr_msg_buffer,
-               g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
+    CHECK_HIP(hipMalloc(&ctx.llr_msg_buffer,
+              g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
 
-    CHECK_hip(hipMalloc(&ctx.llr_total_buffer,
-               num_vns * sizeof(llr_accumulator_t)));
+    CHECK_HIP(hipMalloc(&ctx.llr_total_buffer,
+              num_vns * sizeof(llr_accumulator_t)));
 
-    ThreadContext_hip* self = &ctx;
+    ThreadContext* self = &ctx;
     __atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
 
     return ctx;
@@ -281,26 +303,17 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
 
 // ---------------------------------------------------------------------------
 // ldpc_decoder_init
-//
-// Replaces the original [2][8] upload loop with:
-//   1. build_5G_base_graph(K, N)  — your helper resolves Bg, Zc, index_list,
-//                                   num_rows, num_cols, num_edges
-//   2. upload_tables(g_bg)        — fills cn/vn/cn_degree/vn_degree + strides
-//   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
-ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
+ThreadContext* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
     if (g_initialized)
         return &ldpc_decoder_init_context(make_stream);
 
-    // Delegate all BG selection and Zc resolution to your helper.
-    // Throws std::invalid_argument on bad (K, N) — let it propagate.
     g_bg = build_5G_base_graph(K, N);
 
     printf("LDPC init: K=%d N=%d -> BG%u Zc=%u ils=%u rows=%u cols=%u\n",
            K, N, g_bg.Bg, g_bg.Zc, g_bg.index_list,
            g_bg.num_rows, g_bg.num_cols);
 
-    // Upload only the one (Bg, index_list) table variant we need
     upload_tables(g_bg);
 
     g_initialized = true;
@@ -309,30 +322,26 @@ ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) {
 
 // ---------------------------------------------------------------------------
 // ldpc_decode
-//
-// Parameters simplified vs the original:
-//   - BG and Z are gone (read from g_bg)
-//   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
 uint32_t sp_hip::ldpc_decode(
-        int8_t const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
-        uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
+        int8_t const*  llr_in,
+        uint32_t       K,
         uint32_t       num_iter,
         uint32_t       perform_syndrome_check,
-        int*       llr_bits_out)
+        int*           llr_bits_out)
 {
-        auto& ctx = ldpc_decoder_init_context(0);
+    auto& ctx = ldpc_decoder_init_context(0);
     hipStream_t stream = ctx.stream;
- 
+
     const uint32_t Zc      = g_bg.Zc;
     const uint32_t num_vns = g_bg.num_cols * Zc;
     const uint32_t num_cns = g_bg.num_rows * Zc;
- 
+
     memcpy(ctx.llr_in_buffer, llr_in, num_vns * sizeof(int8_t));
- 
+
     const llr_accumulator_t* llr_total = 
         reinterpret_cast<const llr_accumulator_t*>(ctx.llr_in_buffer);
- 
+
     for (uint32_t iter = 0; iter < num_iter; ++iter) {
         update_cn_kernel<<<blocks_for(num_cns, NODE_KERNEL_BLOCK),
                            NODE_KERNEL_BLOCK, 0, stream>>>(
@@ -341,24 +350,23 @@ uint32_t sp_hip::ldpc_decode(
             g_dev.cn, g_dev.cn_degree, g_dev.cn_stride,
             g_bg.num_rows,
             iter == 0);
- 
+
         update_vn_kernel<<<blocks_for(num_vns, NODE_KERNEL_BLOCK),
                            NODE_KERNEL_BLOCK, 0, stream>>>(
             ctx.llr_msg_buffer, ctx.llr_in_buffer, ctx.llr_total_buffer,
             Zc,
             g_dev.vn, g_dev.vn_degree, g_dev.vn_stride,
             g_bg.num_cols, g_bg.num_rows);
- 
+
         llr_total = ctx.llr_total_buffer;
     }
- 
+
     hard_decision_kernel<<<blocks_for(K, PACK_BITS_THREADS),
                            PACK_BITS_THREADS, 0, stream>>>(
         llr_total, reinterpret_cast<int32_t*>(ctx.llr_bits_out_buffer), K);
- 
+
     CHECK_HIP(hipStreamSynchronize(stream));
     memcpy(llr_bits_out, ctx.llr_bits_out_buffer, K * sizeof(int));
-
 
     return num_iter - 1;
 }
@@ -367,26 +375,25 @@ uint32_t sp_hip::ldpc_decode(
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
 void sp_hip::ldpc_decoder_shutdown() {
-    hipDeviceSynchronize();
+    CHECK_HIP(hipDeviceSynchronize());
 
-    ThreadContext_hip* ctx = nullptr;
+    ThreadContext* ctx = nullptr;
     __atomic_exchange(&all_contexts, &ctx, &ctx, __ATOMIC_ACQ_REL);
     while (ctx) {
-        hipFreeHost(ctx->llr_in_buffer);
-        hipFreeHost(ctx->llr_bits_out_buffer);
-        hipFreeHost(ctx->syndrome_buffer);
-        hipFree(ctx->llr_msg_buffer);
-        hipFree(ctx->llr_total_buffer);
-        if (ctx->stream) hipStreamDestroy(ctx->stream);
+        CHECK_HIP(hipHostFree(ctx->llr_in_buffer));
+        CHECK_HIP(hipHostFree(ctx->llr_bits_out_buffer));
+        CHECK_HIP(hipFree(ctx->llr_msg_buffer));
+        CHECK_HIP(hipFree(ctx->llr_total_buffer));
+        if (ctx->stream) CHECK_HIP(hipStreamDestroy(ctx->stream));
         ctx = ctx->next;
     }
 
-    // Free the four GPU table allocations stored in g_bg
-    hipFree(const_cast<uint32_t*>(g_bg.cn_degree));
-    hipFree(const_cast<uint32_t*>(g_bg.vn_degree));
-    hipFree(const_cast<uint32_t*>(g_bg.cn));
-    hipFree(const_cast<uint32_t*>(g_bg.vn));
+    CHECK_HIP(hipFree(g_dev.cn_degree));
+    CHECK_HIP(hipFree(g_dev.vn_degree));
+    CHECK_HIP(hipFree(g_dev.cn));
+    CHECK_HIP(hipFree(g_dev.vn));
 
     g_initialized = false;
-    g_bg = {};
+    g_bg          = {};
+    g_dev         = {};
 }
