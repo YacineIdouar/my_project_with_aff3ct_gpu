@@ -330,8 +330,9 @@ uint32_t sp_hip::ldpc_decode(
 
     memcpy(ctx.llr_in_buffer, llr_in, num_vns * sizeof(int8_t));
 
-    const dim3 thread2d(NODE_KERNEL_BLOCK, UNROLL_NODES);
-    int8_t const* llr_total = ctx.llr_in_buffer;
+    const llr_accumulator_t* llr_total =
+        reinterpret_cast<const llr_accumulator_t*>(ctx.llr_in_buffer);
+
 
     for (uint32_t iter = 0; iter < num_iter; ++iter) {
         update_cn_kernel<<<blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, stream>>>(
