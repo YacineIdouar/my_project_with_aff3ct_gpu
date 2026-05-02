@@ -100,18 +100,6 @@ static __global__ void update_cn_kernel(
     int      idx_min   = -1;
     uint32_t msg_signs = 0;
 
-#if UNROLL_NODES > 1
-    __shared__ int      mins1    [UNROLL_NODES][NODE_KERNEL_BLOCK+1];
-    __shared__ int      mins2    [UNROLL_NODES][NODE_KERNEL_BLOCK+1];
-    __shared__ int      idx_mins [UNROLL_NODES][NODE_KERNEL_BLOCK+1];
-    __shared__ uint32_t signs    [UNROLL_NODES][NODE_KERNEL_BLOCK+1];
-    mins1[threadIdx.y][threadIdx.x] = INT_MAX;
-    mins2[threadIdx.y][threadIdx.x] = INT_MAX;
-    signs[threadIdx.y][threadIdx.x] = 0;
-#endif
-
-    __syncwarp();
-
     for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
@@ -130,43 +118,10 @@ static __global__ void update_cn_kernel(
         else if (t_abs < min_2) min_2 = t_abs;
     }
 
-#if UNROLL_NODES > 1
-    mins1   [threadIdx.y][threadIdx.x] = min_1;
-    mins2   [threadIdx.y][threadIdx.x] = min_2;
-    idx_mins[threadIdx.y][threadIdx.x] = idx_min;
-    signs   [threadIdx.y][threadIdx.x] = msg_signs;
-
-    __syncthreads();
-
-    if (threadIdx.y == 0) {
-        min_1 = INT_MAX; min_2 = INT_MAX; idx_min = -1; msg_signs = 0;
-        for (int k = 0; k < UNROLL_NODES; ++k) {
-            int t_abs = mins1[k][threadIdx.x];
-            if (t_abs < min_1) { min_2 = min_1; min_1 = t_abs; idx_min = idx_mins[k][threadIdx.x]; }
-            else if (t_abs < min_2) min_2 = t_abs;
-            min_2     = min(min_2, mins2[k][threadIdx.x]);
-            msg_signs |= signs[k][threadIdx.x];
-        }
-        mins1   [0][threadIdx.x] = min_1;
-        mins2   [0][threadIdx.x] = min_2;
-        idx_mins[0][threadIdx.x] = idx_min;
-        signs   [0][threadIdx.x] = msg_signs;
-    }
-
-    __syncthreads();
-
-    min_1     = mins1   [0][threadIdx.x];
-    min_2     = mins2   [0][threadIdx.x];
-    idx_min   = idx_mins[0][threadIdx.x];
-    msg_signs = signs   [0][threadIdx.x];
-#endif
-
     const int node_sign = (__popc(msg_signs) & 1) ? -1 : 1;
 
     min_1 = min(max(APPLY_DAMPING_INT(min_1), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
     min_2 = min(max(APPLY_DAMPING_INT(min_2), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
-
-    __syncwarp();
 
     for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) {
         uint32_t cn         = check_nodes[ii];
@@ -205,13 +160,6 @@ static __global__ void update_vn_kernel(
     const uint32_t vn_degree       = bg_vn_degree[idx_col];
     uint32_t const* variable_nodes = &bg_vn[idx_col * vn_stride];
 
-#if UNROLL_NODES > 1
-    __shared__ int msg_sums[UNROLL_NODES][NODE_KERNEL_BLOCK+1];
-    msg_sums[threadIdx.y][threadIdx.x] = 0;
-#endif
-
-    __syncwarp();
-
     int msg_sum = 0;
     for (uint32_t j = threadIdx.y; j < vn_degree; j += UNROLL_NODES) {
         uint32_t vn         = variable_nodes[j];
@@ -222,69 +170,12 @@ static __global__ void update_vn_kernel(
         msg_sum += llr_msg[msg_idx];
     }
 
-    __syncwarp();
     if (threadIdx.y == 0)
         msg_sum += llr_ch[idx_col * Zc + i];
 
     msg_sum = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
 
-#if UNROLL_NODES > 1
-    msg_sums[threadIdx.y][threadIdx.x] = msg_sum;
-
-    __syncthreads();
-
-    if (threadIdx.y == 0) {
-        msg_sum = 0;
-        for (int k = 0; k < UNROLL_NODES; ++k)
-            msg_sum += msg_sums[k][threadIdx.x];
-        msg_sums[0][threadIdx.x] = msg_sum;
-    }
-
-    __syncthreads();
-
-    msg_sum = msg_sums[0][threadIdx.x];
-#endif
-
-    msg_sum = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
-
-    __syncwarp();
     llr_total[idx_col * Zc + i] = llr_accumulator_t(msg_sum);
-}
-
-// ---------------------------------------------------------------------------
-// compute_syndrome_kernel
-// ---------------------------------------------------------------------------
-__launch_bounds__(512, 3)
-static __global__ void compute_syndrome_kernel(
-        llr_accumulator_t const* __restrict__ llr_total,
-        uint32_t*                __restrict__ syndrome,
-        uint32_t Zc,
-        uint32_t const* __restrict__ bg_cn,
-        uint32_t const* __restrict__ bg_cn_degree,
-        uint32_t cn_stride,
-        uint32_t num_rows)
-{
-    const uint32_t tid     = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t i       = tid % Zc;
-    const uint32_t idx_row = tid / Zc;
-    if (idx_row >= num_rows) return;
-
-    const uint32_t cn_degree    = bg_cn_degree[idx_row];
-    uint32_t const* check_nodes = &bg_cn[idx_row * cn_stride];
-
-    __syncwarp();
-
-    uint32_t sign = 0;
-    for (uint32_t ii = 0; ii < cn_degree; ++ii) {
-        uint32_t cn      = check_nodes[ii];
-        uint32_t idx_col = cn & 0xffffu;
-        uint32_t s       = cn >> 16;
-        sign ^= (uint32_t)(llr_total[idx_col * Zc + (i + s) % Zc] < 0);
-    }
-
-    sign = __any_sync(0xffffffff, sign);
-    if (threadIdx.x % 32 == 0)
-        syndrome[tid / 32] = sign;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +276,7 @@ static void upload_tables(Std_5G_base_graph& bg) {
 // ldpc_decoder_init_context — per-thread working buffer allocation.
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
-static ThreadContext_hip& sp_hip::ldpc_decoder_init_context(int make_stream) {
+static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     auto& ctx = thread_ctx;
     if (ctx.llr_in_buffer) return ctx;
 
