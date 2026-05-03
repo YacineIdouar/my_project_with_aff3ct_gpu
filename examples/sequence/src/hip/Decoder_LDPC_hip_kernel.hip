@@ -319,8 +319,7 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
               num_vns * sizeof(llr_accumulator_t)));
 
     ThreadContext* self = &ctx;
-    __atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
-
+   	self->next = all_contexts.exchange(self, std::memory_order_acq_rel);
     return ctx;
 }
 
