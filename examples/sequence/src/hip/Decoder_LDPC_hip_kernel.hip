@@ -298,19 +298,16 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     }
 
     CHECK_HIP(hipHostMalloc(&ctx.llr_in_buffer,
-              num_vns * sizeof(int8_t),
-              hipHostMallocMapped | hipHostMallocWriteCombined));
+              num_vns * sizeof(int8_t)));
 
     CHECK_HIP(hipHostMalloc(&ctx.llr_in_buffer,
-              g_bg.K_LDPC * sizeof(int),
-              hipHostMallocMapped));
+              g_bg.K_LDPC * sizeof(int)));
 
     // syndrome buffer: one uint32 per warpSize lanes, across num_cns threads.
     // Allocate for the maximum wavefront width (64) to be safe; only
     // (num_cns / warpSize) entries are actually written at runtime.
     CHECK_HIP(hipHostMalloc(&ctx.syndrome_buffer,
-              (num_cns / 32) * sizeof(uint32_t),   // 32 = minimum warpSize
-              hipHostMallocMapped));
+              (num_cns / 32) * sizeof(uint32_t)));
 
     CHECK_HIP(hipMalloc(&ctx.llr_msg_buffer,
               g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
