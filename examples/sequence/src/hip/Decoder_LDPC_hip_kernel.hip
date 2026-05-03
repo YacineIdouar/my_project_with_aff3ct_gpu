@@ -156,7 +156,7 @@ static __global__ void update_cn_kernel(
     min_2 = min(max(APPLY_DAMPING_INT(min_2), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
 
     // Second pass: write messages
-    for (uint32_t ii = 0; ii < cn_degree; ++ii) {
+    for (uint32_t ii = threadIdx.y; ii < cn_degree; ++ii) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
         uint32_t msg_offset = idx_row + idx_col * num_rows;
@@ -197,7 +197,7 @@ static __global__ void update_vn_kernel(
     uint32_t const* variable_nodes = &bg_vn[idx_col * vn_stride];
 
     int msg_sum = 0;
-    for (uint32_t j = 0; j < vn_degree; ++j) {
+    for (uint32_t j = threadIdx.y; j < vn_degree; ++j) {
         uint32_t vn         = variable_nodes[j];
         uint32_t idx_row    = vn & 0xffffu;
         uint32_t s          = vn >> 16;
@@ -206,7 +206,8 @@ static __global__ void update_vn_kernel(
         msg_sum += llr_msg[msg_idx];
     }
 
-    msg_sum += llr_ch[idx_col * Zc + i];
+   if (threadIdx.y == 0)
+        msg_sum += llr_ch[idx_col * Zc + i];
     msg_sum  = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
 
     llr_total[idx_col * Zc + i] = llr_accumulator_t(msg_sum);
