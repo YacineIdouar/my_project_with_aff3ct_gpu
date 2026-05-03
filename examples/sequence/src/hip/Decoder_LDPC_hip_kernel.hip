@@ -156,7 +156,7 @@ static __global__ void update_cn_kernel(
     min_2 = min(max(APPLY_DAMPING_INT(min_2), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
 
     // Second pass: write messages
-/mnt/nfs/users/idouary/these/my_project_with_aff3ct_gpu/    for (uint32_t ii = threadIdx.y; ii < cn_degree; ++ii) {
+	for (uint32_t ii = threadIdx.y; ii < cn_degree; ++ii) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
         uint32_t msg_offset = idx_row + idx_col * num_rows;
