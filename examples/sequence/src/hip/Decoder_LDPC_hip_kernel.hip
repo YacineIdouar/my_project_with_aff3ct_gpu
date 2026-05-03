@@ -156,7 +156,7 @@ static __global__ void update_cn_kernel(
     min_2 = min(max(APPLY_DAMPING_INT(min_2), -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
 
     // Second pass: write messages
-    for (uint32_t ii = threadIdx.y; ii < cn_degree; ++ii) {
+/mnt/nfs/users/idouary/these/my_project_with_aff3ct_gpu/    for (uint32_t ii = threadIdx.y; ii < cn_degree; ++ii) {
         uint32_t cn         = check_nodes[ii];
         uint32_t idx_col    = cn & 0xffffu;
         uint32_t msg_offset = idx_row + idx_col * num_rows;
@@ -297,18 +297,18 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
         CHECK_HIP(hipStreamCreateWithPriority(&ctx.stream, hipStreamNonBlocking, hi));
     }
 
-    CHECK_HIP(hipHostMalloc(reinterpret_cast<void**>(&ctx.llr_in_buffer),
+    CHECK_HIP(hipHostMalloc(&ctx.llr_in_buffer,
               num_vns * sizeof(int8_t),
               hipHostMallocMapped | hipHostMallocWriteCombined));
 
-    CHECK_HIP(hipHostMalloc(reinterpret_cast<void**>(&ctx.llr_bits_out_buffer),
+    CHECK_HIP(hipHostMalloc(&ctx.llr_in_buffer,
               g_bg.K_LDPC * sizeof(int),
               hipHostMallocMapped));
 
     // syndrome buffer: one uint32 per warpSize lanes, across num_cns threads.
     // Allocate for the maximum wavefront width (64) to be safe; only
     // (num_cns / warpSize) entries are actually written at runtime.
-    CHECK_HIP(hipHostMalloc(reinterpret_cast<void**>(&ctx.syndrome_buffer),
+    CHECK_HIP(hipHostMalloc(&ctx.syndrome_buffer,
               (num_cns / 32) * sizeof(uint32_t),   // 32 = minimum warpSize
               hipHostMallocMapped));
 
@@ -318,12 +318,8 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     CHECK_HIP(hipMalloc(&ctx.llr_total_buffer,
               num_vns * sizeof(llr_accumulator_t)));
 
-    // Push this context onto the global linked list atomically.
-    ctx.next = all_contexts.load(std::memory_order_relaxed);
-    while (!all_contexts.compare_exchange_weak(ctx.next, &ctx,
-                                               std::memory_order_release,
-                                               std::memory_order_relaxed))
-        ; // retry
+    ThreadContext* self = &ctx;
+    __atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
 
     return ctx;
 }
