@@ -318,7 +318,7 @@ static ThreadContext_hip& ldpc_decoder_init_context(int make_stream) {
     CHECK_HIP(hipMalloc(&ctx.llr_total_buffer,
               num_vns * sizeof(llr_accumulator_t)));
 
-    ThreadContext* self = &ctx;
+    ThreadContext_hip* self = &ctx;
    	self->next = all_contexts.exchange(self, std::memory_order_acq_rel);
     return ctx;
 }
