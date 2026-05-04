@@ -84,6 +84,7 @@ class Decoder_LDPC_BP_flooding_cuda : public Decoder
                     const bool managed_memory = true);
 
   protected:
+  	ThreadContext* ctx;
 	const int n_ite;
 	const int N_cw;
     virtual int _decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id);

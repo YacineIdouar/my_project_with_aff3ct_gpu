@@ -49,10 +49,7 @@ struct ThreadContext {
 	uint32_t* syndrome_buffer = nullptr;
 	llr_msg_t* llr_msg_buffer = nullptr;
 	llr_accumulator_t* llr_total_buffer = nullptr;
-	ThreadContext* next = nullptr;
 };
-static __thread ThreadContext thread_ctx = {};
-static ThreadContext* all_contexts = nullptr;
 
 #define CHECK_CUDA(call) do { \
     cudaError_t _e = (call); \
@@ -77,11 +74,11 @@ inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
 // ---------------------------------------------------------------------------
 __launch_bounds__(UNROLL_NODES* NODE_KERNEL_BLOCK, 3)
 static __global__ void update_cn_kernel(
-	llr_accumulator_t const* __restrict__ llr_total,
-	llr_msg_t* __restrict__ llr_msg,
+	llr_accumulator_t const* llr_total,
+	llr_msg_t* llr_msg,
 	uint32_t Zc,
-	uint32_t const* __restrict__ bg_cn,
-	uint32_t const* __restrict__ bg_cn_degree,
+	uint32_t const* bg_cn,
+	uint32_t const* bg_cn_degree,
 	uint32_t cn_stride,
 	uint32_t num_rows,
 	bool first_iter)
@@ -204,12 +201,12 @@ static __global__ void update_cn_kernel(
 // ---------------------------------------------------------------------------
 __launch_bounds__(UNROLL_NODES* NODE_KERNEL_BLOCK, 3)
 static __global__ void update_vn_kernel(
-	llr_msg_t const* __restrict__ llr_msg,
-	int8_t const* __restrict__ llr_ch,
-	llr_accumulator_t* __restrict__ llr_total,
+	llr_msg_t const*  llr_msg,
+	int8_t const*  llr_ch,
+	llr_accumulator_t*  llr_total,
 	uint32_t Zc,
-	uint32_t const* __restrict__ bg_vn,
-	uint32_t const* __restrict__ bg_vn_degree,
+	uint32_t const*  bg_vn,
+	uint32_t const*  bg_vn_degree,
 	uint32_t vn_stride,
 	uint32_t num_cols,
 	uint32_t num_rows)
@@ -315,37 +312,9 @@ static __global__ void compute_syndrome_kernel(
 // ---------------------------------------------------------------------------
 static constexpr uint32_t PACK_BITS_THREADS = 256;
 
-//__launch_bounds__(PACK_BITS_THREADS, 6)
-//static __global__ void pack_bits_kernel(
-//        llr_accumulator_t const* __restrict__ llr_total,
-//        uint8_t*                 __restrict__ bits,
-//        uint32_t block_length)
-//{
-//    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-//
-//    uint32_t coop_byte = 0;
-//    if (tid < block_length)
-//        coop_byte = (llr_total[tid] < 0) << (7 - (threadIdx.x & 7));
-//
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 1);
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 2);
-//    coop_byte += __shfl_xor_sync(0xffffffff, coop_byte, 4);
-//
-//    __shared__ uint32_t shared_bits[PACK_BITS_THREADS / 8];
-//    if ((threadIdx.x & 7) == 0)
-//        shared_bits[threadIdx.x / 8] = coop_byte;
-//
-//    __syncthreads();
-//
-//    if (threadIdx.x < PACK_BITS_THREADS / 8 &&
-//        blockIdx.x * PACK_BITS_THREADS + threadIdx.x * 8 < block_length)
-//        bits[blockIdx.x * PACK_BITS_THREADS / 8 + threadIdx.x] = shared_bits[threadIdx.x];
-//}
-
-__launch_bounds__(PACK_BITS_THREADS, 6)
 static __global__ void hard_decision_kernel(
-	llr_accumulator_t const* __restrict__ llr_total,
-	int32_t* __restrict__ bits,
+	llr_accumulator_t const*  llr_total,
+	int32_t*  bits,
 	uint32_t block_length)
 {
 	const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -385,63 +354,56 @@ static void upload_tables(Std_5G_base_graph& bg) {
 
 	uint32_t* tmp;
 
-	CHECK_CUDA(cudaMalloc(&tmp, sz_cn_degree[b][ils]));
-	CHECK_CUDA(cudaMemcpy(tmp, h_cn_degree[b][ils], sz_cn_degree[b][ils], cudaMemcpyHostToDevice));
-	bg.cn_degree = tmp;
+	CHECK_CUDA(cudaMalloc(&bg.cn_degree, sz_cn_degree[b][ils] * sizeof(uint32_t)));
+	CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg.cn_degree), h_cn_degree[b][ils], sz_cn_degree[b][ils], cudaMemcpyHostToDevice));
 
-	CHECK_CUDA(cudaMalloc(&tmp, sz_vn_degree[b][ils]));
-	CHECK_CUDA(cudaMemcpy(tmp, h_vn_degree[b][ils], sz_vn_degree[b][ils], cudaMemcpyHostToDevice));
-	bg.vn_degree = tmp;
+	CHECK_CUDA(cudaMalloc(&bg.vn_degree, sz_vn_degree[b][ils] * sizeof(uint32_t)));
+	CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg.vn_degree), h_vn_degree[b][ils], sz_vn_degree[b][ils], cudaMemcpyHostToDevice));
 
-	CHECK_CUDA(cudaMalloc(&tmp, sz_cn[b][ils]));
-	CHECK_CUDA(cudaMemcpy(tmp, h_cn[b][ils], sz_cn[b][ils], cudaMemcpyHostToDevice));
-	bg.cn = tmp;
-	bg.cn_stride = sz_cn[b][ils] / (sizeof(uint32_t) * bg.num_rows);
+	CHECK_CUDA(cudaMalloc(&bg.cn, sz_cn[b][ils] * sizeof(uint32_t)));
+	CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg.cn), h_cn[b][ils], sz_cn[b][ils], cudaMemcpyHostToDevice));
+	bg.cn_stride = sz_cn[b][ils] / (sizeof(bg.cn[0]) * bg.num_rows);
 
-	CHECK_CUDA(cudaMalloc(&tmp, sz_vn[b][ils]));
-	CHECK_CUDA(cudaMemcpy(tmp, h_vn[b][ils], sz_vn[b][ils], cudaMemcpyHostToDevice));
-	bg.vn = tmp;
-	bg.vn_stride = sz_vn[b][ils] / (sizeof(uint32_t) * bg.num_cols);
+	CHECK_CUDA(cudaMalloc(&bg.vn, sz_vn[b][ils] * sizeof(uint32_t)));
+	CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg.vn), h_vn[b][ils], sz_vn[b][ils], cudaMemcpyHostToDevice));
+	bg.vn_stride = sz_vn[b][ils] / (sizeof(bg.vn[0]) * bg.num_cols);
 }
 
 // ---------------------------------------------------------------------------
 // ldpc_decoder_init_context — per-thread working buffer allocation.
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
-static ThreadContext& ldpc_decoder_init_context(int make_stream) {
-	auto& ctx = thread_ctx;
-	if (ctx.llr_in_buffer) return ctx;
+static ThreadContext* ldpc_decoder_init_context(int make_stream) 
+{
+	ThreadContext* ctx = new ThreadContext;
 
 	const uint32_t num_vns = g_bg.num_cols * g_bg.Zc;
 	const uint32_t num_cns = g_bg.num_rows * g_bg.Zc;
 
-	if (make_stream) {
+	if (make_stream) 
+	{
 		int hi = 0;
 		cudaDeviceGetStreamPriorityRange(nullptr, &hi);
-		CHECK_CUDA(cudaStreamCreateWithPriority(&ctx.stream, cudaStreamNonBlocking, hi));
+		CHECK_CUDA(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
 	}
 
-	CHECK_CUDA(cudaHostAlloc(&ctx.llr_in_buffer,
+	CHECK_CUDA(cudaHostAlloc(&ctx->llr_in_buffer,
 		num_vns * sizeof(int8_t),
 		cudaHostAllocMapped | cudaHostAllocWriteCombined));
 
-	CHECK_CUDA(cudaHostAlloc(&ctx.llr_bits_out_buffer,
+	CHECK_CUDA(cudaHostAlloc(&ctx->llr_bits_out_buffer,
 		(g_bg.K_LDPC) * sizeof(int),
 		cudaHostAllocMapped));
 
-	CHECK_CUDA(cudaHostAlloc(&ctx.syndrome_buffer,
+	CHECK_CUDA(cudaHostAlloc(&ctx->syndrome_buffer,
 		(num_cns / 32) * sizeof(uint32_t),
 		cudaHostAllocMapped));
 
-	CHECK_CUDA(cudaMalloc(&ctx.llr_msg_buffer,
+	CHECK_CUDA(cudaMalloc(&ctx->llr_msg_buffer,
 		g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
 
-	CHECK_CUDA(cudaMalloc(&ctx.llr_total_buffer,
+	CHECK_CUDA(cudaMalloc(&ctx->llr_total_buffer,
 		num_vns * sizeof(llr_accumulator_t)));
-
-	ThreadContext* self = &ctx;
-	__atomic_exchange(&all_contexts, &self, &self->next, __ATOMIC_ACQ_REL);
-
 	return ctx;
 }
 
@@ -456,9 +418,6 @@ static ThreadContext& ldpc_decoder_init_context(int make_stream) {
 // ---------------------------------------------------------------------------
 ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream) 
 {
-	if (g_initialized)
-		return &ldpc_decoder_init_context(make_stream);
-
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
 	g_bg = build_5G_base_graph(K, N);
@@ -471,7 +430,7 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 	upload_tables(g_bg);
 
 	g_initialized = true;
-	return &ldpc_decoder_init_context(make_stream);
+	return ldpc_decoder_init_context(make_stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,51 +441,50 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
 uint32_t sp_cuda::ldpc_decode(
+	ThreadContext* ctx,
 	int8_t const* llr_in,            // g_bg.num_cols * g_bg.Zc bytes
 	uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
 	uint32_t       num_iter,
 	uint32_t       perform_syndrome_check,
 	int* llr_bits_out)
 {
-	auto& ctx = ldpc_decoder_init_context(0);
-	cudaStream_t stream = ctx.stream;
+	cudaStream_t stream = ctx->stream;
 
 	const uint32_t Zc = g_bg.Zc;
 	const uint32_t num_vns = g_bg.num_cols * Zc;
 	const uint32_t num_cns = g_bg.num_rows * Zc;
 
-	memcpy(ctx.llr_in_buffer, llr_in, num_vns * sizeof(int8_t));
+	memcpy(ctx->llr_in_buffer, llr_in, num_vns * sizeof(int8_t));
 
 	const dim3 thread2d(NODE_KERNEL_BLOCK, UNROLL_NODES);
-	int8_t const* llr_total = ctx.llr_in_buffer;
+	int8_t const* llr_total = ctx->llr_in_buffer;
 
-	for (uint32_t iter = 0; iter < num_iter; ++iter) {
+	for (uint32_t iter = 0; iter < num_iter; ++iter)
+	{
 		update_cn_kernel << <blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
-			llr_total, ctx.llr_msg_buffer,
+			llr_total, ctx->llr_msg_buffer,
 			Zc,
 			g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
 			g_bg.num_rows,
 			iter == 0);
 
 		update_vn_kernel << <blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
-			ctx.llr_msg_buffer, ctx.llr_in_buffer, ctx.llr_total_buffer,
+			ctx->llr_msg_buffer, ctx->llr_in_buffer, ctx->llr_total_buffer,
 			Zc,
 			g_bg.vn, g_bg.vn_degree, g_bg.vn_stride,
 			g_bg.num_cols, g_bg.num_rows);
 
-		llr_total = ctx.llr_total_buffer;
+		llr_total = ctx->llr_total_buffer;
 	}
-
-	const uint32_t num_out_bytes = K;
 	hard_decision_kernel << <blocks_for(K, PACK_BITS_THREADS), PACK_BITS_THREADS, 0, stream >> > (
-		llr_total, ctx.llr_bits_out_buffer, K);
+		llr_total, ctx->llr_bits_out_buffer, K);
 
 	cudaStreamSynchronize(stream);
-	memcpy(llr_bits_out, ctx.llr_bits_out_buffer, num_out_bytes * sizeof(int));
+	memcpy(llr_bits_out, ctx->llr_bits_out_buffer, K * sizeof(int));
 
 	if (perform_syndrome_check) {
 		compute_syndrome_kernel << <blocks_for(num_cns, 512), 512, 0, stream >> > (
-			ctx.llr_total_buffer, ctx.syndrome_buffer,
+			ctx->llr_total_buffer, ctx->syndrome_buffer,
 			Zc,
 			g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
 			g_bg.num_rows);
@@ -534,7 +492,7 @@ uint32_t sp_cuda::ldpc_decode(
 		cudaStreamSynchronize(stream);
 
 		for (uint32_t i = 0; i < num_cns / 32; ++i)
-			if (ctx.syndrome_buffer[i] != 0)
+			if (ctx->syndrome_buffer[i] != 0)
 				return num_iter + 1;
 	}
 
@@ -546,18 +504,6 @@ uint32_t sp_cuda::ldpc_decode(
 // ---------------------------------------------------------------------------
 void sp_cuda::ldpc_decoder_shutdown() {
 	cudaDeviceSynchronize();
-
-	ThreadContext* ctx = nullptr;
-	__atomic_exchange(&all_contexts, &ctx, &ctx, __ATOMIC_ACQ_REL);
-	while (ctx) {
-		cudaFreeHost(ctx->llr_in_buffer);
-		cudaFreeHost(ctx->llr_bits_out_buffer);
-		cudaFreeHost(ctx->syndrome_buffer);
-		cudaFree(ctx->llr_msg_buffer);
-		cudaFree(ctx->llr_total_buffer);
-		if (ctx->stream) cudaStreamDestroy(ctx->stream);
-		ctx = ctx->next;
-	}
 
 	// Free the four GPU table allocations stored in g_bg
 	cudaFree(const_cast<uint32_t*>(g_bg.cn_degree));

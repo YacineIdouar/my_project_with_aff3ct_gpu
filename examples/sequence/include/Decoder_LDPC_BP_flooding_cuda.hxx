@@ -20,7 +20,7 @@ Decoder_LDPC_BP_flooding_cuda<B, R>::Decoder_LDPC_BP_flooding_cuda(
     const std::string name = "Decoder_LDPC_BP_flooding_cuda";
     this->set_name(name);
 
-	sp_cuda::ldpc_decoder_init(this->K, this->N_cw, 0);
+	this->ctx = sp_cuda::ldpc_decoder_init(this->K, this->N_cw, 1);
 
 	auto& p1 = this->create_task("decode_siho_cuda");
     auto p1s_Y_N = this->template create_socket_in<B>(p1, "Y_N", this->N);
@@ -62,7 +62,7 @@ template<typename B, typename R>
 int
 Decoder_LDPC_BP_flooding_cuda<B, R>::_decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id)
 {
-    sp_cuda::ldpc_decode(static_cast<const int8_t*>(Y_N),
+    sp_cuda::ldpc_decode(this->ctx,static_cast<const int8_t*>(Y_N),
 				this->K,
 				this->n_ite,
 				0,

@@ -19,7 +19,7 @@ using namespace aff3ct;
 struct params
 {
 #ifndef STEP_BY_STEP
-    size_t n_threads = 6;
+    size_t n_threads = 1;
 #else
     size_t n_threads = 1;
 #endif
