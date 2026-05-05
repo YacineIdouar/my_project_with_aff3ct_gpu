@@ -25,7 +25,7 @@ struct params
 #endif
     float  ebn0_min  =  0.00f; // minimum SNR value
     float  ebn0_max  =  4.01f; // maximum SNR value
-    float  ebn0_step =  0.50f; // SNR step
+    float  ebn0_step =  0.10f; // SNR step
     float  R;                  // code rate (R=K/N)
 
     std::unique_ptr<factory::Source          > source;
@@ -47,9 +47,9 @@ struct modules
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
     std::unique_ptr<     tools ::Codec_LDPC<>>   codec;
                          module::Encoder<>*      encoder;
-                         module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>* decoder;
+                         module::Decoder_LDPC_BP_flooding_cuda<int16_t, int>* decoder;
 	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
-	std::unique_ptr<     module::Quantizer_pow2_fast<float, int8_t>> quantizer;
+	std::unique_ptr<     module::Quantizer_pow2_fast<float, int16_t>> quantizer;
 };
 void init_modules(const params &p, modules &m);
 
@@ -208,11 +208,11 @@ void init_modules(const params &p, modules &m)
     m.channel = std::unique_ptr<     module::Channel     <>> (p.channel->build());
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>> (p.monitor->build());
     m.encoder = &m.codec->get_encoder();
-    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
-	
+    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_cuda<int16_t, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
+
 	std::vector<bool> pct_pattern;
     m.puncturer = std::unique_ptr<module::Puncturer_5G<>> (new module::Puncturer_5G <int, float> (p.puncturer.get()->K, p.puncturer.get()->N,  p.codec->enc.get()->N_cw,  pct_pattern));
-    m.quantizer = std::unique_ptr<module::Quantizer_pow2_fast<float, int8_t>> (new module::Quantizer_pow2_fast<float, int8_t>(p.codec->enc.get()->N_cw, 3));
+    m.quantizer = std::unique_ptr<module::Quantizer_pow2_fast<float, int16_t>> (new module::Quantizer_pow2_fast<float, int16_t>(p.codec->enc.get()->N_cw, 10));
 }
 
 void init_utils(const params &p, const modules &m, utils &u)
