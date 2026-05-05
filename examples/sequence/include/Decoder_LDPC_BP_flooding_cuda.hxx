@@ -24,7 +24,7 @@ Decoder_LDPC_BP_flooding_cuda<B, R>::Decoder_LDPC_BP_flooding_cuda(
 
 	auto& p1 = this->create_task("decode_siho_cuda");
     auto p1s_Y_N = this->template create_socket_in<B>(p1, "Y_N", this->N);
-    auto p1s_CWD = this->template create_socket_out<int8_t>(p1, "CWD", 1);
+    auto p1s_CWD = this->template create_socket_out<int16_t>(p1, "CWD", 1);
     auto p1s_V_K = this->template create_socket_out<R>(p1, "V_K", this->K);
 
 	// Enable GPU
@@ -40,7 +40,7 @@ Decoder_LDPC_BP_flooding_cuda<B, R>::Decoder_LDPC_BP_flooding_cuda(
           auto& dec = static_cast<Decoder_LDPC_BP_flooding_cuda<B, R>&>(m);
 
           dec._decode_siho_gpu(static_cast<B*>(t[p1s_Y_N].get_dataptr()),
-                            	static_cast<int8_t*>(t[p1s_CWD].get_dataptr()),
+                            	static_cast<int16_t*>(t[p1s_CWD].get_dataptr()),
                             	static_cast<R*>(t[p1s_V_K].get_dataptr()),
                             	frame_id);
 
@@ -60,9 +60,9 @@ Decoder_LDPC_BP_flooding_cuda<B, R>::clone() const
 
 template<typename B, typename R>
 int
-Decoder_LDPC_BP_flooding_cuda<B, R>::_decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id)
+Decoder_LDPC_BP_flooding_cuda<B, R>::_decode_siho_gpu(const B* Y_N, int16_t* CWD, R* V_K, const size_t frame_id)
 {
-    sp_cuda::ldpc_decode(this->ctx,static_cast<const int8_t*>(Y_N),
+    sp_cuda::ldpc_decode(this->ctx,static_cast<const int16_t*>(Y_N),
 				this->K,
 				this->n_ite,
 				0,

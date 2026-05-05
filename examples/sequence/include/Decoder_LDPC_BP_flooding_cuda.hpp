@@ -42,7 +42,7 @@ namespace dec_cuda
  *
  * The Decoder takes a soft input (real numbers) and return a hard output (bits).
  */
-template<typename B = int8_t, typename R = int>
+template<typename B = int16_t, typename R = int>
 class Decoder_LDPC_BP_flooding_cuda : public Decoder
 {
   public:
@@ -78,7 +78,7 @@ class Decoder_LDPC_BP_flooding_cuda : public Decoder
      */
     template<class AR = std::allocator<R>, class AB = std::allocator<B>>
     int decode_siho_gpu(const std::vector<R, AR>& Y_N,
-                    std::vector<int8_t, AB>& CWD,
+                    std::vector<int16_t, AB>& CWD,
                     std::vector<B, AB>& V_K,
                     const int frame_id = -1,
                     const bool managed_memory = true);
@@ -87,7 +87,7 @@ class Decoder_LDPC_BP_flooding_cuda : public Decoder
   	ThreadContext* ctx;
 	const int n_ite;
 	const int N_cw;
-    virtual int _decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id);
+    virtual int _decode_siho_gpu(const B* Y_N, int16_t* CWD, R* V_K, const size_t frame_id);
 };
 }
 }

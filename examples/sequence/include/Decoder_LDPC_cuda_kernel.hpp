@@ -49,7 +49,7 @@ ThreadContext* ldpc_decoder_init(int K, int N, int make_stream);
  */
 uint32_t ldpc_decode(
 		ThreadContext* context_,
-        int8_t const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
+        int16_t const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
         uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
         uint32_t       num_iter,
         uint32_t       perform_syndrome_check,
