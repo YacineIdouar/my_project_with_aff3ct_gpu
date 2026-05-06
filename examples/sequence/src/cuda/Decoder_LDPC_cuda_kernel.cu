@@ -24,12 +24,12 @@ using namespace aff3ct::tools;
 // ---------------------------------------------------------------------------
 // Data types (unchanged)
 // ---------------------------------------------------------------------------
-static constexpr int MAX_LLR_ACCUMULATOR_VALUE = 32767;
+static constexpr int MAX_LLR_ACCUMULATOR_VALUE = 127;
 typedef int8_t llr_accumulator_t;
-static constexpr int MAX_LLR_MSG_VALUE = 32767;
+static constexpr int MAX_LLR_MSG_VALUE = 127;
 typedef int8_t llr_msg_t;
 
-#define APPLY_DAMPING_INT(x) ((x)*7/8)
+#define APPLY_DAMPING_INT(x) ((x)*3/4)
 
 // ---------------------------------------------------------------------------
 // Single global base graph instance.
