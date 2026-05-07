@@ -284,13 +284,13 @@ static ThreadContext* ldpc_decoder_init_context(int make_stream)
 	cudaDeviceGetStreamPriorityRange(nullptr, &hi);
 	CHECK_CUDA(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
 
-	CHECK_CUDA(cudaMalloc(&ctx->llr_in_buffer,
+	CHECK_CUDA(cudaMallocHost(&ctx->llr_in_buffer,
 		num_vns * sizeof(float)));
 
-	CHECK_CUDA(cudaMalloc(&ctx->llr_bits_out_buffer,
+	CHECK_CUDA(cudaMallocHost(&ctx->llr_bits_out_buffer,
 		(g_bg.K_LDPC) * sizeof(int)));
 
-	CHECK_CUDA(cudaMallocManaged(&ctx->syndrome_buffer,
+	CHECK_CUDA(cudaMallocHost(&ctx->syndrome_buffer,
 		(num_cns / 32) * sizeof(uint32_t)));
 
 	CHECK_CUDA(cudaMalloc(&ctx->llr_msg_buffer,
@@ -348,18 +348,14 @@ uint32_t sp_cuda::ldpc_decode(
 	const uint32_t Zc = g_bg.Zc;
 	const uint32_t num_vns = g_bg.num_cols * Zc;
 	const uint32_t num_cns = g_bg.num_rows * Zc;
-
-	float const* mapped_llr_in = ctx->llr_in_buffer;
-
-	CHECK_CUDA(cudaMemcpyAsync(const_cast<float*>(mapped_llr_in), llr_in, num_vns * sizeof(*llr_in), cudaMemcpyHostToDevice, stream));
 	
 	const dim3 thread2d(NODE_KERNEL_BLOCK, UNROLL_NODES);
 
 	dim3 t(256);
     dim3 b(blocks_for(num_vns, t.x));
-    clip_channel_kernel<<<b, t, 0, stream>>>(mapped_llr_in, ctx->llr_total_buffer, num_vns);
+    clip_channel_kernel<<<b, t, 0, stream>>>(llr_in, ctx->llr_total_buffer, num_vns);
 
-	float const* llr_total = mapped_llr_in;
+	float const* llr_total = llr_in;
 
 	for (uint32_t iter = 0; iter < num_iter; ++iter)
 	{
@@ -370,17 +366,16 @@ uint32_t sp_cuda::ldpc_decode(
 			g_bg.num_rows,
 			iter == 0);
 		update_vn_kernel << <blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
-			ctx->llr_msg_buffer, mapped_llr_in, ctx->llr_total_buffer,
+			ctx->llr_msg_buffer, llr_in, ctx->llr_total_buffer,
 			Zc,
 			g_bg.vn, g_bg.vn_degree, g_bg.vn_stride,
 			g_bg.num_cols, g_bg.num_rows);
 		llr_total = ctx->llr_total_buffer;
 	}
 	hard_decision_kernel << <blocks_for(K, 256), 256, 0, stream >> > (
-		llr_total, ctx->llr_bits_out_buffer, K);
+		llr_total, llr_bits_out, K);
 
 	cudaStreamSynchronize(stream);
-	cudaMemcpy(llr_bits_out, ctx->llr_bits_out_buffer, K * sizeof(int), cudaMemcpyDeviceToHost);
 
 	return num_iter - 1;
 }
