@@ -47,7 +47,7 @@ struct modules
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
     std::unique_ptr<     tools ::Codec_LDPC<>>   codec;
                          module::Encoder<>*      encoder;
-                         module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>* decoder;
+                         module::Decoder_LDPC_BP_flooding_cuda<float, int>* decoder;
 	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
 	std::unique_ptr<     module::Quantizer_pow2_fast<float, int8_t>> quantizer;
 };
@@ -94,8 +94,9 @@ int main(int argc, char** argv)
     (*m.channel)[   "add_noise::X_N" ]      = (*m.modem  )[   "modulate::X_N2"    ];
     (*m.modem  )[  "demodulate::Y_N1"]      = (*m.channel)[  "add_noise::Y_N"     ];
 	(*m.puncturer)[    "depuncture::Y_N1" ]  = (*m.modem  )[ "demodulate::Y_N2"    ];
-	(*m.quantizer)[      "process::Y_N1" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
-    (*m.decoder)[ "decode_siho_cuda::Y_N" ] =  (*m.quantizer)[      "process::Y_N2" ];
+	(*m.decoder)[ "decode_siho_cuda::Y_N" ] = (*m.puncturer)[ "depuncture::Y_N2"    ];
+	//(*m.quantizer)[      "process::Y_N1" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
+    //(*m.decoder)[ "decode_siho_cuda::Y_N" ] =  (*m.quantizer)[      "process::Y_N2" ];
     (*m.monitor)["check_errors::U"   ]      = (*m.source )[   "generate::out_data"];
     (*m.monitor)["check_errors::V"   ]      = (*m.decoder)["decode_siho_cuda::V_K" ];
     std::vector<float> sigma(1);
@@ -208,7 +209,7 @@ void init_modules(const params &p, modules &m)
     m.channel = std::unique_ptr<     module::Channel     <>> (p.channel->build());
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>> (p.monitor->build());
     m.encoder = &m.codec->get_encoder();
-    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_cuda<int8_t, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
+    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_cuda<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
 
 	std::vector<bool> pct_pattern;
     m.puncturer = std::unique_ptr<module::Puncturer_5G<>> (new module::Puncturer_5G <int, float> (p.puncturer.get()->K, p.puncturer.get()->N,  p.codec->enc.get()->N_cw,  pct_pattern));

@@ -48,7 +48,7 @@ ThreadContext_hip* ldpc_decoder_init(int K, int N, int make_stream);
  * Returns num_iter-1 on success, num_iter+1 if syndrome check fails.
  */
 uint32_t ldpc_decode(
-        int8_t const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
+        float const*  llr_in,            // g_bg.num_cols * g_bg.Zc bytes
         uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
         uint32_t       num_iter,
         uint32_t       perform_syndrome_check,

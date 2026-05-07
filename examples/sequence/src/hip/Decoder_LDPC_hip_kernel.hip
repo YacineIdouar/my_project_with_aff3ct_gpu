@@ -15,7 +15,7 @@ are populated once during init and reused on every decode call.
 #include <stdint.h>
 #include <iostream>
 
-#include "Decoder_LDPC_hip_kernel.hpp"
+#include "Decoder_LDPC_cuda_kernel.hpp"
 #include "ldpc_tables_bg1.hpp"
 #include "ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
@@ -25,10 +25,9 @@ using namespace aff3ct::tools;
 // ---------------------------------------------------------------------------
 // Data types (unchanged)
 // ---------------------------------------------------------------------------
-static constexpr int MAX_LLR_ACCUMULATOR_VALUE = 127;
-typedef int8_t llr_accumulator_t;
-static constexpr int MAX_LLR_MSG_VALUE = 127;
-typedef int8_t llr_msg_t;
+typedef float llr_accumulator_t;
+static constexpr float MAX_CHANNEL_LLR = 128.0f;
+typedef float llr_msg_t;
 
 #define APPLY_DAMPING_INT(x) ((x)*3/4)
 
@@ -45,7 +44,7 @@ static bool              g_initialized = false;
 // ---------------------------------------------------------------------------
 struct ThreadContext_hip {
 	hipStream_t       stream = 0;
-	int8_t* llr_in_buffer = nullptr;
+	float* llr_in_buffer = nullptr;
 	int* llr_bits_out_buffer = nullptr;
 	uint32_t* syndrome_buffer = nullptr;
 	llr_msg_t* llr_msg_buffer = nullptr;
@@ -54,7 +53,7 @@ struct ThreadContext_hip {
 
 #define CHECK_HIP(call) do { \
     hipError_t _e = (call); \
-    if (_e) printf("HIP error %d: %s at %s:%d\n", (int)_e, \
+    if (_e) printf("CUDA error %d: %s at %s:%d\n", (int)_e, \
                    hipGetErrorString(_e), __FILE__, __LINE__); \
 } while(0)
 
@@ -67,6 +66,15 @@ struct ThreadContext_hip {
 inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
 	return (n + bs - 1) / bs;
 }
+
+static __global__ void clip_channel_kernel(float const* __restrict__ in,
+	llr_accumulator_t* __restrict__ out,
+	uint32_t n) {
+	uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+	if (tid < n)
+		out[tid] = fmaxf(-MAX_CHANNEL_LLR, fminf(MAX_CHANNEL_LLR, in[tid]));
+}
+
 
 // ---------------------------------------------------------------------------
 // update_cn_kernel
@@ -92,13 +100,13 @@ static __global__ void update_cn_kernel(
 	const uint32_t cn_degree = bg_cn_degree[idx_row];
 	uint32_t const* check_nodes = &bg_cn[idx_row * cn_stride];
 
-	int      min_1 = INT_MAX;
-	int      min_2 = INT_MAX;
+	float      min_1 = 1e38f;
+	float      min_2 = 1e38f;
 	int      idx_min = -1;
 	int      node_sign = 1;
 	uint32_t msg_signs = 0;
 
-	for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) 
+	for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES)
 	{
 		uint32_t cn = check_nodes[ii];
 		uint32_t idx_col = cn & 0xffffu;
@@ -106,7 +114,7 @@ static __global__ void update_cn_kernel(
 		uint32_t msg_offset = idx_row + idx_col * num_rows;
 		uint32_t msg_idx = msg_offset * Zc + i;
 
-		int t = llr_total[idx_col * Zc + (i + s) % Zc];
+		float t = llr_total[idx_col * Zc + (i + s) % Zc];
 
 		if (!first_iter)
 			t -= llr_msg[msg_idx];
@@ -115,7 +123,7 @@ static __global__ void update_cn_kernel(
 		node_sign *= sign;
 		msg_signs |= (t < 0) << ii; //
 
-		int t_abs = abs(t);
+		float t_abs = fabsf(t);
 		if (t_abs < min_1) { min_2 = min_1; min_1 = t_abs; idx_min = msg_idx; }
 		else if (t_abs < min_2) min_2 = t_abs;
 	}
@@ -125,8 +133,8 @@ static __global__ void update_cn_kernel(
 	// END marker-cnp-damping
 
 	// clip msg magnitudes to MAX_LLR_VALUE
-	min_1 = min(max(min_1, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
-	min_2 = min(max(min_2, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
+	//min_1 = min(max(min_1, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
+	//min_2 = min(max(min_2, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
 	// END marker-vnp-clippin
 
 	if (idx_row < num_rows) {
@@ -138,7 +146,7 @@ static __global__ void update_cn_kernel(
 			uint32_t msg_offset = idx_row + idx_col * num_rows;
 
 			uint32_t msg_idx = msg_offset * Zc + i;
-			int min_val;
+			float min_val;
 			if (msg_idx == idx_min)
 				min_val = min_2;
 			else
@@ -157,12 +165,12 @@ static __global__ void update_cn_kernel(
 // update_vn_kernel
 // ---------------------------------------------------------------------------
 static __global__ void update_vn_kernel(
-	llr_msg_t const*  llr_msg,
-	int8_t const*  llr_ch,
-	llr_accumulator_t*  llr_total,
+	llr_msg_t const* llr_msg,
+	float const* llr_ch,
+	llr_accumulator_t* llr_total,
 	uint32_t Zc,
-	uint32_t const*  bg_vn,
-	uint32_t const*  bg_vn_degree,
+	uint32_t const* bg_vn,
+	uint32_t const* bg_vn_degree,
 	uint32_t vn_stride,
 	uint32_t num_cols,
 	uint32_t num_rows)
@@ -176,29 +184,31 @@ static __global__ void update_vn_kernel(
 	const uint32_t vn_degree = bg_vn_degree[idx_col];
 	uint32_t const* variable_nodes = &bg_vn[idx_col * vn_stride];
 
-	int msg_sum = 0;
-	for (uint32_t j = threadIdx.y; j < vn_degree; j += UNROLL_NODES) 
-	{
-		uint32_t vn = variable_nodes[j];
-		uint32_t idx_row = vn & 0xffffu;
-		uint32_t s = vn >> 16;
-		uint32_t msg_offset = idx_row + idx_col * num_rows;
-		uint32_t msg_idx = msg_offset * Zc + (i - s + (Zc << 8)) % Zc;
-		msg_sum += llr_msg[msg_idx];
+	float msg_sum = 0;
+	if (idx_col < num_cols) {
+		for (uint32_t j = threadIdx.y; j < vn_degree; j += UNROLL_NODES)
+		{
+			uint32_t vn = variable_nodes[j];
+			uint32_t idx_row = vn & 0xffffu;
+			uint32_t s = vn >> 16;
+			uint32_t msg_offset = idx_row + idx_col * num_rows;
+			uint32_t msg_idx = msg_offset * Zc + (i - s + (Zc << 8)) % Zc;
+			msg_sum += llr_msg[msg_idx];
+		}
 	}
 	if (threadIdx.y == 0)
 	{
-        if (idx_col < num_cols)
-        {
-            msg_sum += llr_ch[idx_col*Zc + i];
-        }
-    }
+		if (idx_col < num_cols)
+		{
+			msg_sum += llr_ch[idx_col * Zc + i];
+		}
+	}
 
-	msg_sum = min(max(msg_sum, -MAX_LLR_ACCUMULATOR_VALUE), MAX_LLR_ACCUMULATOR_VALUE);
+	//msg_sum = fmaxf(-MAX_LLR_ACCUMULATOR_VALUE, fminf(MAX_LLR_ACCUMULATOR_VALUE, msg_sum));
 
 	if (idx_col < num_cols)
 	{
-		llr_total[idx_col*Zc + i] = llr_accumulator_t(msg_sum);
+		llr_total[idx_col * Zc + i] = llr_accumulator_t(msg_sum);
 	}
 }
 
@@ -207,8 +217,8 @@ static __global__ void update_vn_kernel(
 // ---------------------------------------------------------------------------
 
 static __global__ void hard_decision_kernel(
-	llr_accumulator_t const*  llr_total,
-	int32_t*  bits,
+	llr_accumulator_t const* llr_total,
+	int* bits,
 	uint32_t block_length)
 {
 	const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -277,7 +287,7 @@ static ThreadContext_hip* ldpc_decoder_init_context(int make_stream)
 	CHECK_HIP(hipStreamCreateWithPriority(&ctx->stream, hipStreamNonBlocking, hi));
 
 	CHECK_HIP(hipMalloc(&ctx->llr_in_buffer,
-		num_vns * sizeof(int8_t)));
+		num_vns * sizeof(float)));
 
 	CHECK_HIP(hipMalloc(&ctx->llr_bits_out_buffer,
 		(g_bg.K_LDPC) * sizeof(int)));
@@ -303,7 +313,7 @@ static ThreadContext_hip* ldpc_decoder_init_context(int make_stream)
 //   2. upload_tables(g_bg)        — fills cn/vn/cn_degree/vn_degree + strides
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
-ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream) 
+ThreadContext_hip* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 {
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -327,9 +337,9 @@ ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream)
 //   - BG and Z are gone (read from g_bg)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
-uint32_t sp_hip::ldpc_decode(
+uint32_t sp_cuda::ldpc_decode(
 	ThreadContext_hip* ctx,
-	int8_t const* llr_in,            // g_bg.num_cols * g_bg.Zc bytes
+	float const* llr_in,            // g_bg.num_cols * g_bg.Zc bytes
 	uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
 	uint32_t       num_iter,
 	uint32_t       perform_syndrome_check,
@@ -341,12 +351,17 @@ uint32_t sp_hip::ldpc_decode(
 	const uint32_t num_vns = g_bg.num_cols * Zc;
 	const uint32_t num_cns = g_bg.num_rows * Zc;
 
+	float const* mapped_llr_in = ctx->llr_in_buffer;
+
+	CHECK_HIP(hipMemcpyAsync(const_cast<float*>(mapped_llr_in), llr_in, num_vns * sizeof(*llr_in), hipMemcpyHostToDevice, stream));
+	
 	const dim3 thread2d(NODE_KERNEL_BLOCK, UNROLL_NODES);
-	int8_t const *mapped_llr_in = ctx->llr_in_buffer;
 
-	CHECK_HIP(hipMemcpyAsync(const_cast<int8_t*>(mapped_llr_in), llr_in, num_vns * sizeof(*llr_in), hipMemcpyHostToDevice, stream));
+	dim3 t(256);
+    dim3 b(blocks_for(num_vns, t.x));
+    clip_channel_kernel<<<b, t, 0, stream>>>(mapped_llr_in, ctx->llr_total_buffer, num_vns);
 
-	int8_t const* llr_total = mapped_llr_in;
+	float const* llr_total = mapped_llr_in;
 
 	for (uint32_t iter = 0; iter < num_iter; ++iter)
 	{
@@ -356,16 +371,11 @@ uint32_t sp_hip::ldpc_decode(
 			g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
 			g_bg.num_rows,
 			iter == 0);
-
-		hipStreamSynchronize(stream);
-
 		update_vn_kernel << <blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
 			ctx->llr_msg_buffer, mapped_llr_in, ctx->llr_total_buffer,
 			Zc,
 			g_bg.vn, g_bg.vn_degree, g_bg.vn_stride,
 			g_bg.num_cols, g_bg.num_rows);
-
-		hipStreamSynchronize(stream);
 		llr_total = ctx->llr_total_buffer;
 	}
 	hard_decision_kernel << <blocks_for(K, 256), 256, 0, stream >> > (
@@ -380,7 +390,7 @@ uint32_t sp_hip::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_hip::ldpc_decoder_shutdown() {
+void sp_cuda::ldpc_decoder_shutdown() {
 	hipDeviceSynchronize();
 
 	// Free the four GPU table allocations stored in g_bg
