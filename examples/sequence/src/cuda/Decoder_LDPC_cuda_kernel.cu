@@ -28,8 +28,7 @@ typedef float llr_accumulator_t;
 static constexpr float MAX_CHANNEL_LLR = 128.0f;
 typedef float llr_msg_t;
 
-#define APPLY_DAMPING_INT(x) ((x)*3/4)
-
+#define OMS_OFFSET 0.5f
 // ---------------------------------------------------------------------------
 // Single global base graph instance.
 // Populated once by ldpc_decoder_init(), read-only from every decode call.
@@ -127,8 +126,8 @@ static __global__ void update_cn_kernel(
 		else if (t_abs < min_2) min_2 = t_abs;
 	}
 
-	min_1 = APPLY_DAMPING_INT(min_1); // min_1 * DAMPING_FACTOR, e.g. *3/4
-	min_2 = APPLY_DAMPING_INT(min_2); // min_2 * DAMPING_FACTOR, e.g. *3/4
+	min_1 = fmaxf(0.f, min_1 - OMS_OFFSET);
+	min_2 = fmaxf(0.f, min_2 - OMS_OFFSET);
 	// END marker-cnp-damping
 
 	// clip msg magnitudes to MAX_LLR_VALUE
