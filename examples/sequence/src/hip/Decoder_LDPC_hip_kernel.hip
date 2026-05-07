@@ -15,7 +15,7 @@ are populated once during init and reused on every decode call.
 #include <stdint.h>
 #include <iostream>
 
-#include "Decoder_LDPC_cuda_kernel.hpp"
+#include "Decoder_LDPC_hip_kernel.hpp"
 #include "ldpc_tables_bg1.hpp"
 #include "ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
@@ -313,7 +313,7 @@ static ThreadContext_hip* ldpc_decoder_init_context(int make_stream)
 //   2. upload_tables(g_bg)        — fills cn/vn/cn_degree/vn_degree + strides
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
-ThreadContext_hip* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
+ThreadContext_hip* sp_hip::ldpc_decoder_init(int K, int N, int make_stream)
 {
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -337,7 +337,7 @@ ThreadContext_hip* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 //   - BG and Z are gone (read from g_bg)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
-uint32_t sp_cuda::ldpc_decode(
+uint32_t sp_hip::ldpc_decode(
 	ThreadContext_hip* ctx,
 	float const* llr_in,            // g_bg.num_cols * g_bg.Zc bytes
 	uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
@@ -390,7 +390,7 @@ uint32_t sp_cuda::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_cuda::ldpc_decoder_shutdown() {
+void sp_hip::ldpc_decoder_shutdown() {
 	hipDeviceSynchronize();
 
 	// Free the four GPU table allocations stored in g_bg
