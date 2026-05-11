@@ -2,8 +2,8 @@
  * \file
  * \brief Class module::Decoder_LDPC_BP_flooding.
  */
-#ifndef DECODER_LDPC_BP_FLOODING_CUDA_HPP_
-#define DECODER_LDPC_BP_FLOODING_CUDA_HPP_
+#ifndef DECODER_LDPC_BP_FLOODING_gpu_HPP_
+#define DECODER_LDPC_BP_FLOODING_gpu_HPP_
 
 #include <cstdint>
 #include <vector>
@@ -24,17 +24,17 @@ namespace aff3ct
 namespace module
 {
 
-namespace dec_cuda
+namespace dec_gpu
 	{
-		enum class tsk : size_t { dec_siho_cuda, SIZE };
+		enum class tsk : size_t { dec_siho_gpu, SIZE };
 		namespace sck
 		{
-			enum class dec_siho_cuda  : size_t { Y_N, CWD, V_K, status};
+			enum class dec_siho_gpu  : size_t { Y_N, CWD, V_K, status};
 		}
 	}
 
 /*!
- * \class Decoder_LDPC_BP_flooding_cuda
+ * \class Decoder_LDPC_BP_flooding_gpu
  *
  * \brief A Decoder is an algorithm dedicated to find the initial sequence of information bits (before the noise).
  *
@@ -43,11 +43,11 @@ namespace dec_cuda
  * The Decoder takes a soft input (real numbers) and return a hard output (bits).
  */
 template<typename B = int8_t, typename R = int>
-class Decoder_LDPC_BP_flooding_cuda : public Decoder
+class Decoder_LDPC_BP_flooding_gpu : public Decoder
 {
   public:
-    inline spu::runtime::Task& operator[](const dec_cuda::tsk t);
-    inline spu::runtime::Socket& operator[](const dec_cuda::sck::dec_siho_cuda s);
+    inline spu::runtime::Task& operator[](const dec_gpu::tsk t);
+    inline spu::runtime::Socket& operator[](const dec_gpu::sck::dec_siho_gpu s);
     inline spu::runtime::Socket& operator[](const std::string& tsk_sck);
 
   public:
@@ -58,17 +58,17 @@ class Decoder_LDPC_BP_flooding_cuda : public Decoder
      * \param N: size of one frame.
      * \param nb_iter: number of iterations.
      */
-    Decoder_LDPC_BP_flooding_cuda(const int K, const int N_LDPC, const int N_cw, const int nb_iter);
+    Decoder_LDPC_BP_flooding_gpu(const int K, const int N_LDPC, const int N_cw, const int nb_iter);
 
-	virtual Decoder_LDPC_BP_flooding_cuda<B, R>* clone() const;
+	virtual Decoder_LDPC_BP_flooding_gpu<B, R>* clone() const;
 
 
     /*!
      * \brief Destructor.
      */
-    virtual ~Decoder_LDPC_BP_flooding_cuda() = default;
+    virtual ~Decoder_LDPC_BP_flooding_gpu() = default;
 
-    //virtual Decoder_LDPC_BP_flooding_cuda<B, R>* clone() const;
+    //virtual Decoder_LDPC_BP_flooding_gpu<B, R>* clone() const;
 
     /*!
      * \brief Task method that decodes the noisy frame.
@@ -93,7 +93,7 @@ class Decoder_LDPC_BP_flooding_cuda : public Decoder
 }
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
-#include "Decoder_LDPC_BP_flooding_cuda.hxx"
+#include "Decoder_LDPC_BP_flooding_gpu.hxx"
 #endif
 
-#endif /* DECODER_LDPC_BP_FLOODING_CUDA_HPP_ */
+#endif /* DECODER_LDPC_BP_FLOODING_gpu_HPP_ */

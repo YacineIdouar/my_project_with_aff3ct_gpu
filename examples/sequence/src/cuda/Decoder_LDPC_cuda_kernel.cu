@@ -130,12 +130,8 @@ static __global__ void update_cn_kernel(
 	min_2 = fmaxf(0.f, min_2 - OMS_OFFSET);
 	// END marker-cnp-damping
 
-	// clip msg magnitudes to MAX_LLR_VALUE
-	//min_1 = min(max(min_1, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
-	//min_2 = min(max(min_2, -MAX_LLR_MSG_VALUE), MAX_LLR_MSG_VALUE);
-	// END marker-vnp-clippin
-
-	if (idx_row < num_rows) {
+	if (idx_row < num_rows) 
+	{
 		for (uint32_t ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES) {
 			uint32_t cn = check_nodes[ii];
 
