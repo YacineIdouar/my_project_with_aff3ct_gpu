@@ -14,7 +14,7 @@
 #include "Tools/Code/LDPC/Syndrome/LDPC_syndrome.hpp"
 #include "Tools/Code/LDPC/Update_rule/SPA/Update_rule_SPA.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
-#include "Decoder_LDPC_cuda_kernel.hpp"
+#include "Cuda/Decoder_LDPC_cuda_kernel.hpp"
 #include "Decoder_LDPC_hip_kernel.hpp"
 
 #include "Module/Decoder/Decoder.hpp"

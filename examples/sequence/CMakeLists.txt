@@ -12,11 +12,22 @@ set(PROJECT_LANGUAGES CXX)
 # CUDA object library — compiled separately so NVCC flags are isolated
 # ---------------------------------------------------------------------------
 
+
+# Creating the objecti file for modules
+file(GLOB_RECURSE module_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/Module/*)
+add_library(obj-module OBJECT ${module_source_files})
+target_include_directories(obj-module PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Module/Channel)
+set_target_properties(obj-module PROPERTIES
+    POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+)
+target_link_libraries(obj-module PUBLIC aff3ct::aff3ct-static-lib)
+
+
 if(DECODER_CUDA)
 	list(APPEND PROJECT_LANGUAGES CUDA)
     file(GLOB_RECURSE cuda_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/*)
     add_library(obj-cuda OBJECT ${cuda_source_files})
-    target_include_directories(obj-cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_include_directories(obj-cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Cuda)
     set_target_properties(obj-cuda PROPERTIES
         POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
     )
@@ -58,7 +69,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Executable
 # $<TARGET_OBJECTS:obj-cuda> injects the compiled .o files from the OBJECT lib
 # ---------------------------------------------------------------------------
-set(link-objects)
+set(link-objects $<TARGET_OBJECTS:obj-module>)
 
 if(DECODER_CUDA)
     list(APPEND link-objects $<TARGET_OBJECTS:obj-cuda>)

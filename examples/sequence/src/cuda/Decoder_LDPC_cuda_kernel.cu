@@ -72,8 +72,6 @@ static __global__ void clip_channel_kernel(float const* __restrict__ in,
 	if (tid < n)
 		out[tid] = fmaxf(-MAX_CHANNEL_LLR, fminf(MAX_CHANNEL_LLR, in[tid]));
 }
-
-
 // ---------------------------------------------------------------------------
 // update_cn_kernel
 // Uses Std_5G_base_graph fields directly: num_rows, cn, cn_degree, cn_stride.
