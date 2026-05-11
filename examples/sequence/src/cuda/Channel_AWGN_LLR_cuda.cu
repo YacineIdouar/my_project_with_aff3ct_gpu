@@ -18,7 +18,7 @@
 #include <curand_kernel.h>
 #include <stdexcept>
 #include <cstdio>
-#include <cmath>
+//#include <cmath>
 #include <iostream>
 
 #include "Cuda/Channel_AWGN_LLR_cuda.hpp"
@@ -43,6 +43,7 @@
 
 // Global variable to deal with thread states
 curandStateXORWOW_t* d_states  = nullptr;
+cudaStream_t stream = 0;
 
 
 /**
@@ -108,6 +109,7 @@ __global__ void awgn_add_noise(const float* __restrict__ x,
  */
 void init_rand_state(int max_samples, int seed, int threads)
 {
+	cudaStreamCreate(&stream);
     /* We need ceil(max_samples/2) threads */
     int n_states = (max_samples + 1) / 2;
     CUDA_CHECK(cudaMalloc(&d_states,
@@ -132,13 +134,11 @@ void add_noise(const float*  d_x,
                float         sigma,
 			   spu::sp_cuda::CudaStream spu_stream)
 {
-	cudaStream_t stream;
-	cudaStreamCreate(&stream);
+	
     int active_threads = (n_samples + 1) / 2;
     int blocks = (active_threads + 256 - 1) / 256;
     awgn_add_noise<<<blocks, 256, 0, stream>>>(
         d_x, d_y, n_samples, sigma, d_states);
 	CUDA_CHECK(cudaStreamSynchronize(stream));
-	cudaStreamDestroy(stream);
 }
 
