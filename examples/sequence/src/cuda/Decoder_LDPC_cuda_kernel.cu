@@ -24,9 +24,9 @@ using namespace aff3ct::tools;
 // ---------------------------------------------------------------------------
 // Data types (unchanged)
 // ---------------------------------------------------------------------------
-typedef float llr_accumulator_t;
+
 static constexpr float MAX_CHANNEL_LLR = 128.0f;
-typedef float llr_msg_t;
+
 
 #define OMS_OFFSET 0.5f
 // ---------------------------------------------------------------------------
@@ -36,18 +36,6 @@ typedef float llr_msg_t;
 // ---------------------------------------------------------------------------
 static Std_5G_base_graph g_bg = {};
 static bool              g_initialized = false;
-
-// ---------------------------------------------------------------------------
-// Thread context (one per OS thread)
-// ---------------------------------------------------------------------------
-struct ThreadContext {
-	cudaStream_t       stream = 0;
-	float* llr_in_buffer = nullptr;
-	int* llr_bits_out_buffer = nullptr;
-	uint32_t* syndrome_buffer = nullptr;
-	llr_msg_t* llr_msg_buffer = nullptr;
-	llr_accumulator_t* llr_total_buffer = nullptr;
-};
 
 #define CHECK_CUDA(call) do { \
     cudaError_t _e = (call); \
@@ -67,7 +55,8 @@ inline __host__ __device__ uint32_t blocks_for(uint32_t n, uint32_t bs) {
 
 static __global__ void clip_channel_kernel(float const* __restrict__ in,
 	llr_accumulator_t* __restrict__ out,
-	uint32_t n) {
+	uint32_t n)
+{
 	uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 	if (tid < n)
 		out[tid] = fmaxf(-MAX_CHANNEL_LLR, fminf(MAX_CHANNEL_LLR, in[tid]));
@@ -263,37 +252,37 @@ static void upload_tables(Std_5G_base_graph* bg)
 	bg->vn_stride = sz_vn[b][ils] / (sizeof(bg->vn[0]) * bg->num_cols);
 }
 
+//Init the GPU handler
+sp_cuda::Cuda_decoder::Cuda_decoder(int device_id)
+	: dev_id(device_id), executor(new spu::executor::CUDA_executor(dev_id)), context(nullptr)
+{
+}
+
 // ---------------------------------------------------------------------------
 // ldpc_decoder_init_context — per-thread working buffer allocation.
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
-static ThreadContext* ldpc_decoder_init_context(int make_stream)
+void sp_cuda::Cuda_decoder::ldpc_decoder_init_context()
 {
-	ThreadContext* ctx = new ThreadContext;
+	this->context = new sp_cuda::ThreadContext;
 
 	const uint32_t num_vns = g_bg.num_cols * g_bg.Zc;
 	const uint32_t num_cns = g_bg.num_rows * g_bg.Zc;
 
-	int hi = 0;
-	cudaDeviceGetStreamPriorityRange(nullptr, &hi);
-	CHECK_CUDA(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
-
-	CHECK_CUDA(cudaMallocHost(&ctx->llr_in_buffer,
+	CHECK_CUDA(cudaMallocHost(&this->context->llr_in_buffer,
 		num_vns * sizeof(float)));
 
-	CHECK_CUDA(cudaMallocHost(&ctx->llr_bits_out_buffer,
+	CHECK_CUDA(cudaMallocHost(&this->context->llr_bits_out_buffer,
 		(g_bg.K_LDPC) * sizeof(int)));
 
-	CHECK_CUDA(cudaMallocHost(&ctx->syndrome_buffer,
+	CHECK_CUDA(cudaMallocHost(&this->context->syndrome_buffer,
 		(num_cns / 32) * sizeof(uint32_t)));
 
-	CHECK_CUDA(cudaMalloc(&ctx->llr_msg_buffer,
+	CHECK_CUDA(cudaMalloc(&this->context->llr_msg_buffer,
 		g_bg.num_rows * g_bg.num_cols * g_bg.Zc * sizeof(llr_msg_t)));
 
-	CHECK_CUDA(cudaMalloc(&ctx->llr_total_buffer,
+	CHECK_CUDA(cudaMalloc(&this->context->llr_total_buffer,
 		num_vns * sizeof(llr_accumulator_t)));
-
-	return ctx;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +294,8 @@ static ThreadContext* ldpc_decoder_init_context(int make_stream)
 //   2. upload_tables(g_bg)        — fills cn/vn/cn_degree/vn_degree + strides
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
-ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
+void
+sp_cuda::Cuda_decoder::ldpc_decoder_init(int K, int N, int make_stream)
 {
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -319,7 +309,7 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 	upload_tables(&g_bg);
 
 	g_initialized = true;
-	return ldpc_decoder_init_context(make_stream);
+	ldpc_decoder_init_context();
 }
 
 // ---------------------------------------------------------------------------
@@ -329,15 +319,16 @@ ThreadContext* sp_cuda::ldpc_decoder_init(int K, int N, int make_stream)
 //   - BG and Z are gone (read from g_bg)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
-uint32_t sp_cuda::ldpc_decode(
-	ThreadContext* ctx,
-	float const* llr_in,            // g_bg.num_cols * g_bg.Zc bytes
+uint32_t
+sp_cuda::Cuda_decoder::ldpc_decode(
+	float const*   llr_in,            // g_bg.num_cols * g_bg.Zc bytes
 	uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
 	uint32_t       num_iter,
 	uint32_t       perform_syndrome_check,
-	int* llr_bits_out)
+	int* llr_bits_out,
+	spu::device_interface::GpuStream* stream)
 {
-	cudaStream_t stream = ctx->stream;
+	auto native_stream = stream->cast<cudaStream_t>();
 
 	const uint32_t Zc = g_bg.Zc;
 	const uint32_t num_vns = g_bg.num_cols * Zc;
@@ -347,29 +338,19 @@ uint32_t sp_cuda::ldpc_decode(
 
 	dim3 t(256);
     dim3 b(blocks_for(num_vns, t.x));
-    clip_channel_kernel<<<b, t, 0, stream>>>(llr_in, ctx->llr_total_buffer, num_vns);
+	executor->launch(clip_channel_kernel, b, t, 0, native_stream, llr_in, this->context->llr_total_buffer, num_vns);
 
 	float const* llr_total = llr_in;
 
 	for (uint32_t iter = 0; iter < num_iter; ++iter)
 	{
-		update_cn_kernel << <blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
-			llr_total, ctx->llr_msg_buffer,
-			Zc,
-			g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
-			g_bg.num_rows,
-			iter == 0);
-		update_vn_kernel << <blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, stream >> > (
-			ctx->llr_msg_buffer, llr_in, ctx->llr_total_buffer,
-			Zc,
-			g_bg.vn, g_bg.vn_degree, g_bg.vn_stride,
-			g_bg.num_cols, g_bg.num_rows);
-		llr_total = ctx->llr_total_buffer;
+		executor->launch(update_cn_kernel, blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, native_stream, llr_total, this->context->llr_msg_buffer, Zc, g_bg.cn, g_bg.cn_degree, g_bg.cn_stride, g_bg.num_rows, iter == 0);
+		executor->launch(update_vn_kernel, blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, native_stream, this->context->llr_msg_buffer, llr_in, this->context->llr_total_buffer, Zc, g_bg.vn, g_bg.vn_degree, g_bg.vn_stride, g_bg.num_cols, g_bg.num_rows);
+		llr_total = this->context->llr_total_buffer;
 	}
-	hard_decision_kernel << <blocks_for(K, 256), 256, 0, stream >> > (
-		llr_total, llr_bits_out, K);
+	executor->launch(hard_decision_kernel, blocks_for(K, 256), 256, 0, native_stream, llr_total, llr_bits_out, K);
 
-	cudaStreamSynchronize(stream);
+	executor->synchronize(native_stream);
 
 	return num_iter - 1;
 }
@@ -377,15 +358,4 @@ uint32_t sp_cuda::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_cuda::ldpc_decoder_shutdown() {
-	cudaDeviceSynchronize();
-
-	// Free the four GPU table allocations stored in g_bg
-	cudaFree(const_cast<uint32_t*>(g_bg.cn_degree));
-	cudaFree(const_cast<uint32_t*>(g_bg.vn_degree));
-	cudaFree(const_cast<uint32_t*>(g_bg.cn));
-	cudaFree(const_cast<uint32_t*>(g_bg.vn));
-
-	g_initialized = false;
-	g_bg = {};
-}
+void sp_cuda::Cuda_decoder::ldpc_decoder_shutdown() {}

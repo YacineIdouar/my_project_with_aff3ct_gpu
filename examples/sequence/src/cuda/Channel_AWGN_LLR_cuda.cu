@@ -14,8 +14,6 @@
  *    a full float2 pair without bounds-check overhead in the hot path.
  */
 
-#include <cuda_runtime.h>
-#include <curand_kernel.h>
 #include <stdexcept>
 #include <cstdio>
 //#include <cmath>
@@ -42,8 +40,7 @@
 /* ------------------------------------------------------------------ */
 
 // Global variable to deal with thread states
-curandStateXORWOW_t* d_states  = nullptr;
-cudaStream_t stream = 0;
+
 
 
 /**
@@ -107,9 +104,15 @@ __global__ void awgn_add_noise(const float* __restrict__ x,
  * Allocate and initialise RNG states for up to max_samples samples.
  * Call once per simulation, then reuse across all frames / SNR points.
  */
-void init_rand_state(int max_samples, int seed, int threads)
+
+Cuda_channel::Cuda_channel(int dev_id) : dev_id(dev_id), executor(new spu::executor::CUDA_executor(dev_id)), d_states(nullptr)
 {
-	cudaStreamCreate(&stream);
+}
+
+void 
+Cuda_channel::init_rand_state(int max_samples, int seed, int threads)
+{
+	cudaSetDevice(dev_id);
     /* We need ceil(max_samples/2) threads */
     int n_states = (max_samples + 1) / 2;
     CUDA_CHECK(cudaMalloc(&d_states,
@@ -128,17 +131,17 @@ void init_rand_state(int max_samples, int seed, int threads)
  * @param sigma      Noise standard deviation (use awgn_sigma_from_EbN0)
  * @param stream     CUDA stream (default: 0)
  */
-void add_noise(const float*  d_x,
+void 
+Cuda_channel::add_noise(const float*  d_x,
                float*        d_y,
                int           n_samples,
                float         sigma,
-			   spu::sp_cuda::CudaStream spu_stream)
+			   spu::device_interface::GpuStream* stream)
 {
-	
+	auto native_stream = stream->cast<cudaStream_t>();
     int active_threads = (n_samples + 1) / 2;
     int blocks = (active_threads + 256 - 1) / 256;
-    awgn_add_noise<<<blocks, 256, 0, stream>>>(
-        d_x, d_y, n_samples, sigma, d_states);
-	CUDA_CHECK(cudaStreamSynchronize(stream));
+	executor->launch(awgn_add_noise, blocks, 256, 0, native_stream, d_x, d_y, n_samples, sigma, d_states);
+	executor->synchronize(native_stream);
 }
 

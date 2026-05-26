@@ -9,7 +9,7 @@ using namespace aff3ct::module;
 template <typename R>
 Channel_AWGN_LLR_gpu<R>
 ::Channel_AWGN_LLR_gpu(const int N, const size_t seed)
-: spu::module::Stateful(), N(N), seed(seed), noised_data(this->N * this->n_frames, 0), internal_stream()
+: spu::module::Stateful(), N(N), seed(seed), noised_data(this->N * this->n_frames, 0)
 {
 	const std::string name = "Channel_gpu";
 	this->set_name(name);
@@ -34,25 +34,22 @@ Channel_AWGN_LLR_gpu<R>
 	auto p1s_Y_N = this->template create_socket_out<R    >(p1, "Y_N", this->N);
 
 	// Setting GPU task
-	p1.set_compute_api(spu::device_interface::compute_api::CUDA);
-	p1.set_execution_device_id(0);
-	p1.set_execution_platform_id(0);
+	size_t p1_cuda_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::CUDA, 0, 0);
+	this->cuda_handler = new Cuda_channel(0);
+	this->cuda_handler->init_rand_state(this->N, this->seed);
 
-	// Initialise the internal state of gpu threads
-	init_rand_state(this->N, this->seed);
-
-
-	this->create_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int
+	this->register_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N, p1_cuda_stream](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int
 	{
 		auto &chn2 = static_cast<Channel_AWGN_LLR_gpu<R>&>(m);
 
-		chn2._add_noise(static_cast<float*>(t[p1s_CP ].get_dataptr()),
-		                static_cast<R    *>(t[p1s_X_N].get_dataptr()),
-		                static_cast<R    *>(t[p1s_Y_N].get_dataptr()),
-		                frame_id);
+		chn2.cuda_handler->add_noise(static_cast<const float*>(t[p1s_X_N ].get_dataptr()),
+		                              static_cast<float*>(t[p1s_Y_N].get_dataptr()),
+		                              chn2.get_N(),
+		                              *static_cast<const float*>(t[p1s_CP].get_dataptr()),
+		                               t.get_gpu_stream(p1_cuda_stream));
 
 		return spu::runtime::status_t::SUCCESS;
-	});
+	}, spu::device_interface::compute_api::CUDA);
 }
 
 template <typename R>
@@ -76,7 +73,7 @@ void Channel_AWGN_LLR_gpu<R>
 ::set_seed(const int seed)
 {
 	this->seed = seed;
-	init_rand_state(this->N, this->seed);
+	this->cuda_handler->init_rand_state(this->N, this->seed);
 }
 
 template <typename R>
@@ -106,7 +103,7 @@ template <typename R>
 void Channel_AWGN_LLR_gpu<R>
 ::_add_noise(const float *CP, const R *X_N, R *Y_N, const size_t frame_id)
 {
-	add_noise(static_cast<const float*>(X_N), static_cast<float*>(Y_N), this->N, *CP, this->internal_stream);
+	//add_noise(static_cast<const float*>(X_N), static_cast<float*>(Y_N), this->N, *CP, this->cuda_handler->get_stream());
 }
 
 
