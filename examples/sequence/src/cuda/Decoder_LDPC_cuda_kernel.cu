@@ -295,7 +295,7 @@ void sp_cuda::Cuda_decoder::ldpc_decoder_init_context()
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
 void
-sp_cuda::Cuda_decoder::ldpc_decoder_init(int K, int N, int make_stream)
+sp_cuda::Cuda_decoder::ldpc_decoder_init(int K, int N)
 {
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -307,9 +307,9 @@ sp_cuda::Cuda_decoder::ldpc_decoder_init(int K, int N, int make_stream)
 
 	// Upload only the one (Bg, index_list) table variant we need
 	upload_tables(&g_bg);
+	ldpc_decoder_init_context();
 
 	g_initialized = true;
-	ldpc_decoder_init_context();
 }
 
 // ---------------------------------------------------------------------------

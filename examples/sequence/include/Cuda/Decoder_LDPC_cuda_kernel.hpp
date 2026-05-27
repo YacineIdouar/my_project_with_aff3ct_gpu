@@ -28,7 +28,7 @@ namespace sp_cuda
 		ThreadContext* context;
 	public:
 		Cuda_decoder(int device_id);
-		void ldpc_decoder_init(int K, int N, int make_stream);
+		void ldpc_decoder_init(int K, int N);
 		void ldpc_decoder_init_context();
 
 		uint32_t ldpc_decode(

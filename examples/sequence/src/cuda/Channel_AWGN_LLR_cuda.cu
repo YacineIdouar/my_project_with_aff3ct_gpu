@@ -109,7 +109,7 @@ Cuda_channel::Cuda_channel(int dev_id) : dev_id(dev_id), executor(new spu::execu
 {
 }
 
-void 
+void
 Cuda_channel::init_rand_state(int max_samples, int seed, int threads)
 {
 	cudaSetDevice(dev_id);

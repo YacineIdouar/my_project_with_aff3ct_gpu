@@ -20,32 +20,32 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::Decoder_LDPC_BP_flooding_gpu(
     const std::string name = "Decoder_LDPC_BP_flooding_gpu";
     this->set_name(name);
 
-	this->ctx = sp_cuda::ldpc_decoder_init(this->K, this->N_cw, 1);
-
 	auto& p1 = this->create_task("decode_siho_gpu");
     auto p1s_Y_N = this->template create_socket_in<B>(p1, "Y_N", this->N);
     auto p1s_CWD = this->template create_socket_out<int8_t>(p1, "CWD", 1);
     auto p1s_V_K = this->template create_socket_out<R>(p1, "V_K", this->K);
 
 	// Enable GPU
-	p1.set_compute_api(spu::device_interface::compute_api::CUDA);
-	p1.set_execution_device_id(0);
-	p1.set_execution_platform_id(0);
+	size_t p1_stream_cuda = this->create_gpu_stream(p1, spu::device_interface::compute_api::CUDA, 0, 0);
+	this->cuda_handler = new sp_cuda::Cuda_decoder(0);
+	this->cuda_handler->ldpc_decoder_init(this->K, this->N_cw);
 
-
-    this->create_codelet(
+    this->register_codelet(
       p1,
-      [p1s_Y_N, p1s_CWD, p1s_V_K](spu::module::Module& m, spu::runtime::Task& t, const size_t frame_id) -> int
+      [p1s_Y_N, p1s_CWD, p1s_V_K, p1_stream_cuda](spu::module::Module& m, spu::runtime::Task& t, const size_t frame_id) -> int
       {
           auto& dec = static_cast<Decoder_LDPC_BP_flooding_gpu<B, R>&>(m);
 
-          dec._decode_siho_gpu(static_cast<B*>(t[p1s_Y_N].get_dataptr()),
-                            	static_cast<int8_t*>(t[p1s_CWD].get_dataptr()),
-                            	static_cast<R*>(t[p1s_V_K].get_dataptr()),
-                            	frame_id);
+         dec.cuda_handler->ldpc_decode(
+			static_cast<const float*>(t[p1s_Y_N].get_dataptr()),
+			dec.K,
+			dec.n_ite,
+			0,
+			static_cast<int*>(t[p1s_V_K].get_dataptr()),
+			t.get_gpu_stream(p1_stream_cuda));
 
-          return spu::runtime::status_t::SUCCESS;
-      });
+          return spu::runtime::status_t::SUCCESS;},
+		  spu::device_interface::compute_api::CUDA);
 }
 
 template<typename B, typename R>
@@ -62,11 +62,12 @@ template<typename B, typename R>
 int
 Decoder_LDPC_BP_flooding_gpu<B, R>::_decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id)
 {
-    sp_cuda::ldpc_decode(this->ctx,static_cast<const float*>(Y_N),
-				this->K,
-				this->n_ite,
-				0,
-                static_cast<int*>(V_K));
+    //sp_cuda::ldpc_decode(this->ctx,static_cast<const float*>(Y_N),
+	//			this->K,
+	//			this->n_ite,
+	//			0,
+    //            static_cast<int*>(V_K));
+	//
 	return 0;
 }
 

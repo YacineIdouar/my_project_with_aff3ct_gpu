@@ -84,9 +84,10 @@ class Decoder_LDPC_BP_flooding_gpu : public Decoder
                     const bool managed_memory = true);
 
   protected:
-  	sp_cuda::Cuda_decoder cuda_handler;
+  	sp_cuda::Cuda_decoder* cuda_handler;
 	const int n_ite;
 	const int N_cw;
+	int dev_id, platform_id;
     virtual int _decode_siho_gpu(const B* Y_N, int8_t* CWD, R* V_K, const size_t frame_id);
 };
 }

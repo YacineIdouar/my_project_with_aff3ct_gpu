@@ -20,7 +20,7 @@ using namespace aff3ct;
 struct params
 {
 #ifndef STEP_BY_STEP
-    size_t n_threads = 4;
+    size_t n_threads = 1;
 #else
     size_t n_threads = 1;
 #endif
@@ -106,6 +106,7 @@ int main(int argc, char** argv)
 
 	// Setting the task type for channel
 	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
+	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
