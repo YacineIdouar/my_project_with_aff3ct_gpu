@@ -1,29 +1,91 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0054 NEW)
 
-project (my_project)
 
-# Enable C++11
-set(CMAKE_CXX_STANDARD 11)
+option(DECODER_CUDA "Enabling Nvidia CUDA of LDPC decoder" OFF)
+option(DECODER_HIP "Enabling Nvidia HIP of LDPC decoder" OFF)
+
+set(PROJECT_LANGUAGES CXX)
+
+
+# ---------------------------------------------------------------------------
+# CUDA object library — compiled separately so NVCC flags are isolated
+# ---------------------------------------------------------------------------
+
+
+# Creating the objecti file for modules
+file(GLOB_RECURSE module_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/Module/*)
+add_library(obj-module OBJECT ${module_source_files})
+target_include_directories(obj-module PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Module/Channel)
+set_target_properties(obj-module PROPERTIES
+    POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+)
+target_link_libraries(obj-module PUBLIC aff3ct::aff3ct-static-lib)
+
+
+if(DECODER_CUDA)
+	list(APPEND PROJECT_LANGUAGES CUDA)
+    file(GLOB_RECURSE cuda_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/*)
+    add_library(obj-cuda OBJECT ${cuda_source_files})
+    target_include_directories(obj-cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Cuda)
+    set_target_properties(obj-cuda PROPERTIES
+        POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+    )
+    target_link_libraries(obj-cuda PUBLIC aff3ct::aff3ct-static-lib)
+endif()
+
+
+if(DECODER_HIP)
+    file(GLOB_RECURSE hip_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/hip/*)
+    add_library(obj-hip OBJECT ${hip_source_files})
+    target_include_directories(obj-hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(obj-hip PROPERTIES
+        POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+    )
+    target_link_libraries(obj-hip PUBLIC aff3ct::aff3ct-static-lib)
+	list(APPEND PROJECT_LANGUAGES HIP)
+endif()
+
+project(my_project ${PROJECT_LANGUAGES})
+
+
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Specify bin path
-set (EXECUTABLE_OUTPUT_PATH bin/)
+set(EXECUTABLE_OUTPUT_PATH bin/)
 
-# Create the executable from sources
-add_executable(my_project ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
-
-# Find Threads library (required to link with AFF3CT after)
 set(CMAKE_THREAD_PREFER_PTHREAD ON)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-# Find cpptrace library (required to link with AFF3CT after)
 find_package(cpptrace CONFIG 0.4.1)
+find_package(StreamPU REQUIRED)
+find_package(AFF3CT CONFIG 4.1.1 REQUIRED)
 
-# Find AFF3CT library
-find_package(AFF3CT CONFIG 4.1.2 REQUIRED)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# Link with AFF3CT static library (note that it is also possible to link with
-# the shared library with the `aff3ct::aff3ct-shared-lib` target)
-target_link_libraries(my_project PRIVATE aff3ct::aff3ct-static-lib)
+
+# ---------------------------------------------------------------------------
+# Executable
+# $<TARGET_OBJECTS:obj-cuda> injects the compiled .o files from the OBJECT lib
+# ---------------------------------------------------------------------------
+set(link-objects $<TARGET_OBJECTS:obj-module>)
+
+if(DECODER_CUDA)
+    list(APPEND link-objects $<TARGET_OBJECTS:obj-cuda>)
+endif()
+
+if(DECODER_HIP)
+    list(APPEND link-objects $<TARGET_OBJECTS:obj-hip>)
+endif()
+
+add_executable(my_project
+    ${link-objects}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+)
+
+target_include_directories(my_project PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+target_link_libraries(my_project PRIVATE
+    aff3ct::aff3ct-static-lib
+)

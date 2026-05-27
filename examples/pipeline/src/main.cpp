@@ -11,21 +11,24 @@
 #include <random>
 
 #include <aff3ct.hpp>
+#include "Decoder_LDPC_BP_flooding_gpu.hpp"
+#include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 using namespace aff3ct;
 
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
-    float  ebn0      = 20.00f; // SNR value
+    float  ebn0      = 1.50f; // SNR value
     float  R;                  // code rate (R=K/N)
 
     std::unique_ptr<factory::Source          > source;
-    std::unique_ptr<factory::Codec_repetition> codec;
+    std::unique_ptr<factory::Codec_LDPC      > codec;
     std::unique_ptr<factory::Modem           > modem;
     std::unique_ptr<factory::Channel         > channel;
     std::unique_ptr<factory::Monitor_BFER    > monitor;
     std::unique_ptr<factory::Sink            > sink;
     std::unique_ptr<factory::Terminal        > terminal;
+	std::unique_ptr<factory::Puncturer       > puncturer;
 };
 void init_params(int argc, char** argv, params &p);
 
@@ -38,7 +41,8 @@ struct modules
     std::unique_ptr<spu::module::Sink<>>         sink;
     std::unique_ptr<     tools ::Codec_SIHO<>>   codec;
                          module::Encoder<>*      encoder;
-                         module::Decoder_SIHO<>* decoder;
+                        module::Decoder_LDPC_BP_flooding_gpu<float, int>* decoder;
+	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
 };
 void init_modules(const params &p, modules &m);
 
@@ -55,6 +59,7 @@ int main(int argc, char** argv)
 {
     // StreamPU will catch and manage sigint
     spu::tools::Signal_handler::init();
+	spu::Devices_manager::explore_gpu_devices();
 
     // get the AFF3CT version
     const std::string v = "v" + std::to_string(tools::version_major()) + "." +
@@ -72,17 +77,21 @@ int main(int argc, char** argv)
 
     // sockets binding (connect the sockets of the tasks = fill the input sockets with the output sockets)
     (*m.encoder)[      "encode::U_K"     ] = (*m.source )[   "generate::out_data" ];
-    (*m.modem  )[    "modulate::X_N1"    ] = (*m.encoder)[     "encode::X_N"      ];
+	(*m.puncturer)[    "puncture::X_N1" ]  = (*m.encoder)[     "encode::X_N"      ];
+    (*m.modem  )[    "modulate::X_N1"    ] = (*m.puncturer)[      "puncture::X_N2" ];
     (*m.channel)[   "add_noise::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
     (*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise::Y_N"      ];
-    (*m.decoder)[ "decode_siho::Y_N"     ] = (*m.modem  )[ "demodulate::Y_N2"     ];
+	(*m.puncturer)[ "depuncture::Y_N1"   ] = (*m.modem  )[ "demodulate::Y_N2"     ];
+    (*m.decoder)[ "decode_siho_gpu::Y_N" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
     (*m.monitor)["check_errors::U"       ] = (*m.source )[   "generate::out_data" ];
-    (*m.monitor)["check_errors::V"       ] = (*m.decoder)["decode_siho::V_K"      ];
+    (*m.monitor)["check_errors::V"       ] = (*m.decoder)["decode_siho_gpu::V_K"      ];
     (*m.sink   )[  "send_count::in_count"] = (*m.source )[   "generate::out_count"];
-    (*m.sink   )[  "send_count::in_data" ] = (*m.decoder)["decode_siho::V_K"      ];
+    (*m.sink   )[  "send_count::in_data" ] = (*m.decoder)["decode_siho_gpu::V_K"      ];
     std::vector<float> sigma(1);
     (*m.channel)[   "add_noise::CP"      ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
+
+	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
@@ -112,7 +121,10 @@ int main(int argc, char** argv)
     u.terminal->start_temp_report();
 
     // will automatically stop when `m.source->is_done()` will be `true` (end of input file) or if user press `Ctrl+c`
-    u.pipeline->exec();
+    u.pipeline->exec([&m]() -> bool
+        {
+            return m.monitor->is_done();
+        });
 
     // display the performance (BER and FER) in the terminal
     u.terminal->final_report();
@@ -133,14 +145,15 @@ int main(int argc, char** argv)
 void init_params(int argc, char** argv, params &p)
 {
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
-    p.codec    = std::unique_ptr<factory::Codec_repetition>(new factory::Codec_repetition());
+    p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
     p.modem    = std::unique_ptr<factory::Modem           >(new factory::Modem           ());
     p.channel  = std::unique_ptr<factory::Channel         >(new factory::Channel         ());
     p.monitor  = std::unique_ptr<factory::Monitor_BFER    >(new factory::Monitor_BFER    ());
     p.sink     = std::unique_ptr<factory::Sink            >(new factory::Sink            ());
     p.terminal = std::unique_ptr<factory::Terminal        >(new factory::Terminal        ());
+	p.puncturer = std::unique_ptr<factory::Puncturer      >(new factory::Puncturer       ());
 
-    std::vector<factory::Factory*> params_list = { p.source  .get(), p.codec  .get(), p.modem.get(),
+    std::vector<factory::Factory*> params_list = { p.source  .get(), p.codec  .get(), p.puncturer.get(), p.modem.get(),
                                                    p.channel .get(), p.monitor.get(), p.sink .get(),
                                                    p.terminal.get()                                  };
 
@@ -159,7 +172,7 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
-    p.R = (float)p.codec->enc->K / (float)p.codec->enc->N_cw; // compute the code rate
+     p.R = (float)p.codec->enc->K / (float)p.puncturer->N; // compute the code rate
 }
 
 void init_modules(const params &p, modules &m)
@@ -171,10 +184,13 @@ void init_modules(const params &p, modules &m)
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
     m.sink    = std::unique_ptr<spu::module::Sink        <>>(p.sink   ->build());
     m.encoder = &m.codec->get_encoder();
-    m.decoder = &m.codec->get_decoder_siho();
+    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
+	// Building the puncturer
+	std::vector<bool> pct_pattern;
+    m.puncturer = std::unique_ptr<module::Puncturer_5G<>> (new module::Puncturer_5G <int, float> (p.puncturer.get()->K, p.puncturer.get()->N,  p.codec->enc.get()->N_cw,  pct_pattern));
 
     // prevent the monitor to stop the pipeline
-    m.monitor->disable_is_done(true);
+    //m.monitor->disable_is_done(true);
 }
 
 void init_utils(const params &p, const modules &m, utils &u)
@@ -193,11 +209,20 @@ void init_utils(const params &p, const modules &m, utils &u)
         // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.encoder)("encode")) //                                          first task of the stage
-            .add_last_task((*m.decoder)("decode_siho")) //                                      last  task of the stage
-            .set_n_threads(p.n_threads ? p.n_threads : 1)) //          can run on a multiple threads (with replication)
+            .add_last_task((*m.puncturer)("depuncture")) //                                      last  task of the stage
+            .set_n_threads(4)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
-            .set_buffer_size(5) //                                                          synchronization buffer size
+            .set_buffer_size(3) //                                                          synchronization buffer size
+            .set_active_waiting(false)) //                                          passive waiting for synchronization
+
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
+            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
+            .set_n_threads(1)) //          can run on a multiple threads (with replication)
+        // ------------------------------------------------------------------------------------------------------------
+        .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+            .set_buffer_size(3) //                                                          synchronization buffer size
             .set_active_waiting(false)) //                                          passive waiting for synchronization
         // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
