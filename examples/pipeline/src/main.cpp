@@ -18,7 +18,7 @@ using namespace aff3ct;
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
-    float  ebn0      = 1.50f; // SNR value
+    float  ebn0      = 2.50f; // SNR value
     float  R;                  // code rate (R=K/N)
 
     std::unique_ptr<factory::Source          > source;
@@ -219,7 +219,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
             .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-            .set_n_threads(1)) //          can run on a multiple threads (with replication)
+            .set_n_threads(2)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size

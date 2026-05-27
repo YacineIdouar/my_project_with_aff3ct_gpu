@@ -54,6 +54,8 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::clone() const
 {
 	auto m = new Decoder_LDPC_BP_flooding_gpu<B, R>(*this);
 	m->deep_copy(*this);
+	m->cuda_handler = new sp_cuda::Cuda_decoder(0);
+	m->cuda_handler->ldpc_decoder_init(this->K, this->N_cw);
 	return m;
 
 }
