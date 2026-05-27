@@ -209,21 +209,21 @@ void init_utils(const params &p, const modules &m, utils &u)
         // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.encoder)("encode")) //                                          first task of the stage
-            .add_last_task((*m.puncturer)("depuncture")) //                                      last  task of the stage
+            .add_last_task((*m.decoder)("decode_siho_gpu"))  //                                      last  task of the stage
             .set_n_threads(4)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size
             .set_active_waiting(false)) //                                          passive waiting for synchronization
 
-		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
-            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
-            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-            .set_n_threads(2)) //          can run on a multiple threads (with replication)
-        // ------------------------------------------------------------------------------------------------------------
-        .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
-            .set_buffer_size(3) //                                                          synchronization buffer size
-            .set_active_waiting(false)) //                                          passive waiting for synchronization
+		//.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+       //     .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
+       //     .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
+       //     .set_n_threads(2)) //          can run on a multiple threads (with replication)
+       // // ------------------------------------------------------------------------------------------------------------
+       // .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+       //     .set_buffer_size(3) //                                                          synchronization buffer size
+       //     .set_active_waiting(false)) //                                          passive waiting for synchronization
         // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
             .set_first_tasks({&(*m.monitor)("check_errors"), //                            two first tasks of the stage
