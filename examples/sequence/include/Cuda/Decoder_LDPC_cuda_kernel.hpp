@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <aff3ct.hpp>
+#include <streampu.hpp>
 #include "ldpc_tables_bg1.hpp"
 #include "ldpc_tables_bg2.hpp"
 
