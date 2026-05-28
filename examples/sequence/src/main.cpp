@@ -20,12 +20,12 @@ using namespace aff3ct;
 struct params
 {
 #ifndef STEP_BY_STEP
-    size_t n_threads = 1;
+    size_t n_threads = 4;
 #else
     size_t n_threads = 1;
 #endif
-    float  ebn0_min  =  0.00f; // minimum SNR value
-    float  ebn0_max  =  4.01f; // maximum SNR value
+    float  ebn0_min  =  2.30f; // minimum SNR value
+    float  ebn0_max  =  2.41f; // maximum SNR value
     float  ebn0_step =  0.10f; // SNR step
     float  R;                  // code rate (R=K/N)
 
@@ -44,7 +44,8 @@ struct modules
 {
     std::unique_ptr<spu::module::Source<>>       source;
     std::unique_ptr<     module::Modem<>>        modem;
-    std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel;
+    //std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel;
+	std::unique_ptr< module::Channel<>      > channel;
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
     std::unique_ptr<     tools ::Codec_LDPC<>>   codec;
                          module::Encoder<>*      encoder;
@@ -92,8 +93,8 @@ int main(int argc, char** argv)
     (*m.encoder)[      "encode::U_K" ]      = (*m.source )[   "generate::out_data"];
 	(*m.puncturer)[      "puncture::X_N1" ] = (*m.encoder)[     "encode::X_N"     ];
     (*m.modem  )[    "modulate::X_N1"]      = (*m.puncturer)[      "puncture::X_N2" ];
-    (*m.channel)[   "add_noise_gpu::X_N" ]  = (*m.modem  )[   "modulate::X_N2"    ];
-    (*m.modem  )[  "demodulate::Y_N1"]      = (*m.channel)[  "add_noise_gpu::Y_N"     ];
+    (*m.channel)[   "add_noise::X_N" ]  = (*m.modem  )[   "modulate::X_N2"    ];
+    (*m.modem  )[  "demodulate::Y_N1"]      = (*m.channel)[  "add_noise::Y_N"     ];
 	(*m.puncturer)[    "depuncture::Y_N1" ] = (*m.modem  )[ "demodulate::Y_N2"    ];
 	(*m.decoder)[ "decode_siho_gpu::Y_N" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
 	//(*m.quantizer)[      "process::Y_N1" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
@@ -101,11 +102,11 @@ int main(int argc, char** argv)
     (*m.monitor)["check_errors::U"   ]      = (*m.source )[   "generate::out_data"];
     (*m.monitor)["check_errors::V"   ]      = (*m.decoder)["decode_siho_gpu::V_K" ];
     std::vector<float> sigma(1);
-    (*m.channel)[   "add_noise_gpu::CP"  ] = sigma;
+    (*m.channel)[   "add_noise::CP"  ] = sigma;
     (*m.modem  )[  "demodulate::CP"  ] = sigma;
 
 	// Setting the task type for channel
-	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
+	//(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
 	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
@@ -211,8 +212,9 @@ void init_modules(const params &p, modules &m)
     m.source  = std::unique_ptr<spu::module::Source      <>> (p.source ->build());
     m.codec   = std::unique_ptr<     tools ::Codec_LDPC  <>> (p.codec  ->build());
 	m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
-    m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed));
-    m.monitor = std::unique_ptr<     module::Monitor_BFER<>> (p.monitor->build());
+    //m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed));
+	m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
+	m.monitor = std::unique_ptr<     module::Monitor_BFER<>> (p.monitor->build());
     m.encoder = &m.codec->get_encoder();
     m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
 
