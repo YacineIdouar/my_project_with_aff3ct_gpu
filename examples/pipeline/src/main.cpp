@@ -91,7 +91,7 @@ int main(int argc, char** argv)
     (*m.channel)[   "add_noise::CP"      ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
 
-	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
+	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::HIP, 0, 0}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
@@ -210,7 +210,7 @@ void init_utils(const params &p, const modules &m, utils &u)
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.encoder)("encode")) //                                          first task of the stage
             .add_last_task((*m.puncturer)("depuncture"))  //                                      last  task of the stage
-            .set_n_threads(4)) //          can run on a multiple threads (with replication)
+            .set_n_threads(8)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size
@@ -219,7 +219,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(2)) //          can run on a multiple threads (with replication)
+           .set_n_threads(5)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
        	    .set_buffer_size(3) //                                                          synchronization buffer size

@@ -1,12 +1,16 @@
 #ifndef Channel_AWGN_LLR_GPU_HPP_
 #define Channel_AWGN_LLR_GPU_HPP_
 
+
+
+#if defined(DECODER_CUDA)
 #include <cstdint>
 #include <cstddef>
 #include <vector>
 #include <memory>
 
 #include <aff3ct.hpp>
+
 #include "Cuda/Channel_AWGN_LLR_cuda.hpp"
 
 namespace aff3ct
@@ -62,4 +66,5 @@ protected:
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hxx"
 #endif
 
+#endif
 #endif /* Channel_AWGN_LLR_GPU_HPP_ */

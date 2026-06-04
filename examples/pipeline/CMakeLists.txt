@@ -39,7 +39,7 @@ endif()
 if(DECODER_HIP)
     file(GLOB_RECURSE hip_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/hip/*)
     add_library(obj-hip OBJECT ${hip_source_files})
-    target_include_directories(obj-hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_include_directories(obj-hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/hip)
     set_target_properties(obj-hip PROPERTIES
         POSITION_INDEPENDENT_CODE ON 
     )
@@ -64,7 +64,7 @@ find_package(Threads REQUIRED)
 
 find_package(cpptrace CONFIG 0.4.1)
 find_package(StreamPU REQUIRED)
-find_package(AFF3CT CONFIG 4.1.1 REQUIRED)
+find_package(AFF3CT REQUIRED)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 

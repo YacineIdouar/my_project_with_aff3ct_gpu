@@ -6,7 +6,7 @@
 #include "ldpc_tables_bg2.hpp"
 
 
-namespace spu { namespace executor { class Hip_executor; } }
+namespace spu { namespace executor { class HIP_executor; } }
 
 typedef float llr_msg_t;
 typedef float llr_accumulator_t;
@@ -24,7 +24,7 @@ namespace sp_hip
 	{
 	private:
 		int dev_id;
-		spu::executor::Hip_executor* executor;
+		spu::executor::HIP_executor* executor;
 		ThreadContext* context;
 	public:
 		Hip_decoder(int device_id);
@@ -39,7 +39,7 @@ namespace sp_hip
 			int* llr_bits_out,
 			spu::device_interface::GpuStream* stream);
 
-		void ldpc_decoder_shutdown(void);
+		void ldpc_decoder_shutdown();
 	};
 
 }

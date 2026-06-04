@@ -1,6 +1,7 @@
 #ifndef Channel_AWGN_LLR_CUDA_HPP_
 #define Channel_AWGN_LLR_CUDA_HPP_
 
+#ifdef DECODER_CUDA
 #include <streampu.hpp>
 
 #ifdef __CUDACC__
@@ -27,5 +28,7 @@ public:
                float         sigma,
 			   spu::device_interface::GpuStream* stream);
 };
+
+#endif
 
 #endif

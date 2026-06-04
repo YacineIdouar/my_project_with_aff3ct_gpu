@@ -15,7 +15,7 @@ are populated once during init and reused on every decode call.
 #include <stdint.h>
 #include <iostream>
 
-#include "Decoder_LDPC_hip_kernel.hpp"
+#include "hip/Decoder_LDPC_hip_kernel.hpp"
 #include "ldpc_tables_bg1.hpp"
 #include "ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
@@ -39,8 +39,6 @@ static bool              g_initialized = false;
 // ---------------------------------------------------------------------------
 // Thread context (one per OS thread)
 // ---------------------------------------------------------------------------
-static Std_5G_base_graph g_bg = {};
-static bool              g_initialized = false;
 
 #define CHECK_HIP(call) do { \
     hipError_t _e = (call); \
@@ -263,7 +261,7 @@ static void upload_tables(Std_5G_base_graph* bg)
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
 sp_hip::Hip_decoder::Hip_decoder(int device_id)
-	: dev_id(device_id), executor(new spu::executor::Hip_executor(dev_id)), context(nullptr)
+	: dev_id(device_id), executor(new spu::executor::HIP_executor(dev_id)), context(nullptr)
 {
 }
 
@@ -283,13 +281,13 @@ void sp_hip::Hip_decoder::ldpc_decoder_init_context()
 	const uint32_t num_vns = g_bg.num_cols * g_bg.Zc;
 	const uint32_t num_cns = g_bg.num_rows * g_bg.Zc;
 
-	CHECK_HIP(hipMallocHost(&this->context->llr_in_buffer,
+	CHECK_HIP(hipHostMalloc(&this->context->llr_in_buffer,
 		num_vns * sizeof(float)));
 
-	CHECK_HIP(hipMallocHost(&this->context->llr_bits_out_buffer,
+	CHECK_HIP(hipHostMalloc(&this->context->llr_bits_out_buffer,
 		(g_bg.K_LDPC) * sizeof(int)));
 
-	CHECK_HIP(hipMallocHost(&this->context->syndrome_buffer,
+	CHECK_HIP(hipHostMalloc(&this->context->syndrome_buffer,
 		(num_cns / 32) * sizeof(uint32_t)));
 
 	CHECK_HIP(hipMalloc(&this->context->llr_msg_buffer,
@@ -364,6 +362,4 @@ sp_hip::Hip_decoder::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_hip::ldpc_decoder_shutdown() {
-
-}
+void sp_hip::Hip_decoder::ldpc_decoder_shutdown() {}

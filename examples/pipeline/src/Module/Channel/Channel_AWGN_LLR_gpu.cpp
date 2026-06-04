@@ -1,3 +1,4 @@
+#if defined(DECODER_CUDA)
 #include <algorithm>
 #include <string>
 
@@ -5,6 +6,8 @@
 
 using namespace aff3ct;
 using namespace aff3ct::module;
+
+
 
 template <typename R>
 Channel_AWGN_LLR_gpu<R>
@@ -112,3 +115,5 @@ void Channel_AWGN_LLR_gpu<R>
 template class aff3ct::module::Channel_AWGN_LLR_gpu<float>;
 //template class aff3ct::module::Channel_AWGN_LLR_gpu<double>;
 // ==================================================================================== explicit template instantiation
+
+#endif
