@@ -26,8 +26,6 @@ using namespace aff3ct::tools;
 // ---------------------------------------------------------------------------
 
 static constexpr float MAX_CHANNEL_LLR = 128.0f;
-
-
 #define OMS_OFFSET 0.5f
 // ---------------------------------------------------------------------------
 // Single global base graph instance.

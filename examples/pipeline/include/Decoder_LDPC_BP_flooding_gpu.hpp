@@ -85,6 +85,7 @@ class Decoder_LDPC_BP_flooding_gpu : public Decoder
 
   protected:
   	sp_cuda::Cuda_decoder* cuda_handler;
+	sp_hip::Hip_decoder* hip_handler;
 	const int n_ite;
 	const int N_cw;
 	int dev_id, platform_id;

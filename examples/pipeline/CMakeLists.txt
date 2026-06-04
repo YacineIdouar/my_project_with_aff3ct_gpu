@@ -1,37 +1,38 @@
 cmake_minimum_required(VERSION 3.18)
 cmake_policy(SET CMP0054 NEW)
 
-
 option(DECODER_CUDA "Enabling Nvidia CUDA of LDPC decoder" OFF)
 option(DECODER_HIP "Enabling Nvidia HIP of LDPC decoder" OFF)
 
 set(PROJECT_LANGUAGES CXX)
 
-
 # ---------------------------------------------------------------------------
 # CUDA object library — compiled separately so NVCC flags are isolated
 # ---------------------------------------------------------------------------
 
-
-# Creating the objecti file for modules
+# Creating the object file for modules
 file(GLOB_RECURSE module_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/Module/*)
 add_library(obj-module OBJECT ${module_source_files})
 target_include_directories(obj-module PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Module/Channel)
 set_target_properties(obj-module PROPERTIES
-    POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+    POSITION_INDEPENDENT_CODE ON 
 )
 target_link_libraries(obj-module PUBLIC aff3ct::aff3ct-static-lib)
 
 
 if(DECODER_CUDA)
-	list(APPEND PROJECT_LANGUAGES CUDA)
+    list(APPEND PROJECT_LANGUAGES CUDA)
     file(GLOB_RECURSE cuda_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/*)
     add_library(obj-cuda OBJECT ${cuda_source_files})
     target_include_directories(obj-cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/Cuda)
     set_target_properties(obj-cuda PROPERTIES
-        POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+        POSITION_INDEPENDENT_CODE ON 
     )
     target_link_libraries(obj-cuda PUBLIC aff3ct::aff3ct-static-lib)
+
+    # --- ADDED: Guard definitions for CUDA targets ---
+    target_compile_definitions(obj-cuda PRIVATE DECODER_CUDA)
+    target_compile_definitions(obj-module PRIVATE DECODER_CUDA)
 endif()
 
 
@@ -40,14 +41,17 @@ if(DECODER_HIP)
     add_library(obj-hip OBJECT ${hip_source_files})
     target_include_directories(obj-hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     set_target_properties(obj-hip PROPERTIES
-        POSITION_INDEPENDENT_CODE ON # needed when .cu files call extern "C" across TUs
+        POSITION_INDEPENDENT_CODE ON 
     )
     target_link_libraries(obj-hip PUBLIC aff3ct::aff3ct-static-lib)
-	list(APPEND PROJECT_LANGUAGES HIP)
+    list(APPEND PROJECT_LANGUAGES HIP)
+
+    # --- ADDED: Guard definitions for HIP targets ---
+    target_compile_definitions(obj-hip PRIVATE DECODER_HIP)
+    target_compile_definitions(obj-module PRIVATE DECODER_HIP)
 endif()
 
 project(my_project ${PROJECT_LANGUAGES})
-
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,7 +71,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ---------------------------------------------------------------------------
 # Executable
-# $<TARGET_OBJECTS:obj-cuda> injects the compiled .o files from the OBJECT lib
 # ---------------------------------------------------------------------------
 set(link-objects $<TARGET_OBJECTS:obj-module>)
 
@@ -89,3 +92,12 @@ target_include_directories(my_project PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(my_project PRIVATE
     aff3ct::aff3ct-static-lib
 )
+
+# --- ADDED: Guard definitions for the main executable ---
+if(DECODER_CUDA)
+    target_compile_definitions(my_project PRIVATE DECODER_CUDA)
+endif()
+
+if(DECODER_HIP)
+    target_compile_definitions(my_project PRIVATE DECODER_HIP)
+endif()
