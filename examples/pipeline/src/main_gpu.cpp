@@ -11,6 +11,8 @@
 #include <random>
 
 #include <aff3ct.hpp>
+#include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
+#include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 using namespace aff3ct;
 
 struct params
@@ -34,11 +36,13 @@ struct modules
 {
     std::unique_ptr<spu::module::Source<>>       source;
     std::unique_ptr<     module::Modem<>>        modem;
-    std::unique_ptr<     module::Channel<>>      channel;
+    //std::unique_ptr<     module::Channel<>>      channel;
+	std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel;
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
     std::unique_ptr<spu::module::Sink<>>         sink;
     std::unique_ptr<     tools ::Codec_SIHO<>>   codec;
                          module::Encoder<>*      encoder;
+                         //module::Decoder_LDPC_BP_flooding_gpu<float, int>* decoder;
 						 module::Decoder_SIHO<>* decoder;
 	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
 };
@@ -77,8 +81,10 @@ int main(int argc, char** argv)
     (*m.encoder)[      "encode::U_K"     ] = (*m.source )[   "generate::out_data" ];
 	(*m.puncturer)[    "puncture::X_N1" ]  = (*m.encoder)[     "encode::X_N"      ];
     (*m.modem  )[    "modulate::X_N1"    ] = (*m.puncturer)[      "puncture::X_N2" ];
-    (*m.channel)[   "add_noise::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
-    (*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise::Y_N"      ];
+	(*m.channel)[   "add_noise_gpu::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
+    (*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise_gpu::Y_N"      ];
+    //(*m.channel)[   "add_noise::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
+    //(*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise::Y_N"      ];
 	(*m.puncturer)[ "depuncture::Y_N1"   ] = (*m.modem  )[ "demodulate::Y_N2"     ];
     (*m.decoder)[ "decode_siho::Y_N" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
     (*m.monitor)["check_errors::U"       ] = (*m.source )[   "generate::out_data" ];
@@ -86,8 +92,11 @@ int main(int argc, char** argv)
     (*m.sink   )[  "send_count::in_count"] = (*m.source )[   "generate::out_count"];
     (*m.sink   )[  "send_count::in_data" ] = (*m.decoder)["decode_siho::V_K"      ];
     std::vector<float> sigma(1);
-    (*m.channel)[   "add_noise::CP"      ] = sigma;
+    (*m.channel)[   "add_noise_gpu::CP"      ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
+
+	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
+	//(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
@@ -176,10 +185,12 @@ void init_modules(const params &p, modules &m)
     m.source  = std::unique_ptr<spu::module::Source      <>>(p.source ->build());
     m.codec   = std::unique_ptr<     tools ::Codec_SIHO  <>>(p.codec  ->build());
     m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
-    m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
+	m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed));
+    //m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
     m.sink    = std::unique_ptr<spu::module::Sink        <>>(p.sink   ->build());
     m.encoder = &m.codec->get_encoder();
+    //m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
 	m.decoder = &m.codec->get_decoder_siho();
 	// Building the puncturer
 	std::vector<bool> pct_pattern;
@@ -205,12 +216,31 @@ void init_utils(const params &p, const modules &m, utils &u)
         // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.encoder)("encode")) //                                          first task of the stage
-            .add_last_task((*m.decoder)("decode_siho_gpu"))  //                                      last  task of the stage
-            .set_n_threads(8)) //          can run on a multiple threads (with replication)
+            .add_last_task((*m.modem)("modulate"))  //                                      last  task of the stage
+            .set_n_threads(4)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size
             .set_active_waiting(false)) //                                          passive waiting for synchronization
+
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+            .add_first_task((*m.channel)("add_noise_gpu")) //                                          first task of the stage
+            .add_last_task((*m.channel)("add_noise_gpu"))  //                                      last  task of the stage
+            .set_n_threads(2)) //          can run on a multiple threads (with replication)
+        // ------------------------------------------------------------------------------------------------------------
+        .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+            .set_buffer_size(3) //                                                          synchronization buffer size
+            .set_active_waiting(false)) //                                          passive waiting for synchronization
+
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+           .add_first_task((*m.modem)("demodulate")) //                                          first task of the stage
+           .add_last_task((*m.decoder)("decode_siho")) //                                      last  task of the stage
+           .set_n_threads(8)) //          can run on a multiple threads (with replication)
+       // // ------------------------------------------------------------------------------------------------------------
+       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+       	    .set_buffer_size(3) //                                                          synchronization buffer size
+       	    .set_active_waiting(false)) //                                          passive waiting for synchronization
+        // ------------------------------------------------------------------------------------------------------------
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
             .set_first_tasks({&(*m.monitor)("check_errors"), //                            two first tasks of the stage
                               &(*m.sink)("send_count")}) //                  (and NO need for a last task in this case)
