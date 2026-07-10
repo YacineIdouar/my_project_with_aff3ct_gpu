@@ -71,6 +71,29 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::Decoder_LDPC_BP_flooding_gpu(
           return spu::runtime::status_t::SUCCESS;},
 		  spu::device_interface::compute_api::HIP);
 #endif
+#ifdef DECODER_SYCL
+	// Enable GPU
+	size_t p1_stream_sycl = this->create_gpu_stream(p1, spu::device_interface::compute_api::SYCL, 0, 0);
+	this->sycl_handler = new sp_sycl::Sycl_decoder(0, 0);
+	this->sycl_handler->ldpc_decoder_init(this->K, this->N_cw);
+
+    this->register_codelet(
+      p1,
+      [p1s_Y_N, p1s_CWD, p1s_V_K, p1_stream_sycl](spu::module::Module& m, spu::runtime::Task& t, const size_t frame_id) -> int
+      {
+          auto& dec = static_cast<Decoder_LDPC_BP_flooding_gpu<B, R>&>(m);
+
+         dec.sycl_handler->ldpc_decode(
+			static_cast<const float*>(t[p1s_Y_N].get_dataptr()),
+			dec.K,
+			dec.n_ite,
+			0,
+			static_cast<int*>(t[p1s_V_K].get_dataptr()),
+			t.get_gpu_stream(p1_stream_sycl));
+
+          return spu::runtime::status_t::SUCCESS;},
+			  spu::device_interface::compute_api::SYCL);
+#endif
 }
 
 template<typename B, typename R>
@@ -86,6 +109,10 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::clone() const
 #ifdef DECODER_HIP
 	m->hip_handler = new sp_hip::Hip_decoder(0);
 	m->hip_handler->ldpc_decoder_init(this->K, this->N_cw);
+#endif
+#ifdef DECODER_SYCL
+	m->sycl_handler = new sp_sycl::Sycl_decoder(0, 0);
+	m->sycl_handler->ldpc_decoder_init(this->K, this->N_cw);
 #endif
 	return m;
 

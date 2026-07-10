@@ -16,6 +16,7 @@
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
 #include "Cuda/Decoder_LDPC_cuda_kernel.hpp"
 #include "Hip/Decoder_LDPC_hip_kernel.hpp"
+#include "Sycl/Decoder_LDPC_sycl_kernel.hpp"
 
 #include "Module/Decoder/Decoder.hpp"
 
@@ -86,6 +87,7 @@ class Decoder_LDPC_BP_flooding_gpu : public Decoder
   protected:
   	sp_cuda::Cuda_decoder* cuda_handler;
 	sp_hip::Hip_decoder* hip_handler;
+	sp_sycl::Sycl_decoder* sycl_handler;
 	const int n_ite;
 	const int N_cw;
 	int dev_id, platform_id;
