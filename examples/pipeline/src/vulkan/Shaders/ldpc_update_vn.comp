@@ -1,0 +1,74 @@
+#version 450
+/*
+GLSL port of update_vn_kernel in ../../cuda/Decoder_LDPC_cuda_kernel.cu.
+See ldpc_update_cn.comp for why the threadIdx.y / UNROLL_NODES dimension is dropped.
+*/
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) readonly buffer LlrMsgBuf
+{
+    float data[];
+}
+llr_msg;
+
+layout(set = 0, binding = 1) readonly buffer LlrChBuf
+{
+    float data[];
+}
+llr_ch;
+
+layout(set = 0, binding = 2) writeonly buffer LlrTotalBuf
+{
+    float data[];
+}
+llr_total;
+
+layout(set = 0, binding = 3) readonly buffer BgVnBuf
+{
+    uint data[];
+}
+bg_vn;
+
+layout(set = 0, binding = 4) readonly buffer BgVnDegreeBuf
+{
+    uint data[];
+}
+bg_vn_degree;
+
+layout(push_constant) uniform PushConstants
+{
+    uint Zc;
+    uint vn_stride;
+    uint num_cols;
+    uint num_rows;
+}
+pc;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    uint i = tid % pc.Zc;
+    uint idx_col = tid / pc.Zc;
+
+    if (idx_col >= pc.num_cols) return;
+
+    uint vn_degree = bg_vn_degree.data[idx_col];
+    uint variable_base = idx_col * pc.vn_stride;
+
+    float msg_sum = 0.0;
+    for (uint j = 0u; j < vn_degree; j++)
+    {
+        uint vn = bg_vn.data[variable_base + j];
+        uint idx_row = vn & 0xffffu;
+        uint s = vn >> 16;
+        uint msg_offset = idx_row + idx_col * pc.num_rows;
+        uint msg_idx = msg_offset * pc.Zc + (i - s + (pc.Zc << 8)) % pc.Zc;
+        msg_sum += llr_msg.data[msg_idx];
+    }
+
+    msg_sum += llr_ch.data[idx_col * pc.Zc + i];
+
+    llr_total.data[idx_col * pc.Zc + i] = msg_sum;
+}

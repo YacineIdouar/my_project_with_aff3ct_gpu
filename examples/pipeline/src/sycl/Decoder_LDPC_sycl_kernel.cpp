@@ -14,8 +14,16 @@ Threading model: the CUDA/HIP kernels are launched with a 2D block
 (NODE_KERNEL_BLOCK, UNROLL_NODES) and a 1D grid (only blockIdx.x is used), so
 threadIdx.y never varies across blocks — it only unrolls the per-node loop
 inside a single block. This is reproduced here with a 2D nd_range whose global
-range in dimension 1 equals its local range (UNROLL_NODES), i.e. get_global_id(0)
-plays the role of CUDA's "tid" and get_local_id(1) plays the role of threadIdx.y.
+range in dimension 0 equals its local range (UNROLL_NODES), i.e. get_global_id(1)
+plays the role of CUDA's "tid" and get_local_id(0) plays the role of threadIdx.y.
+
+Note the dimension order is the mirror of CUDA's: in SYCL the *last* dimension is
+the fastest-varying one (it maps to threadIdx.x on the CUDA/HIP backends), so "tid"
+must live in dimension 1 to keep the llr_total/llr_msg accesses derived from
+i = tid % Zc unit-stride across a sub-group, exactly as threadIdx.x does in the
+CUDA/HIP kernels. Putting tid in dimension 0 instead still gives correct results,
+but it silently serialises those loads as soon as UNROLL_NODES > 1 makes
+dimension 1 non-degenerate.
 */
 
 #include <sycl/sycl.hpp>
@@ -86,12 +94,12 @@ static void update_cn_kernel(
 {
 	const uint32_t num_cns = num_rows * Zc;
 	const uint32_t gx = blocks_for(num_cns, NODE_KERNEL_BLOCK) * NODE_KERNEL_BLOCK;
-	sycl::nd_range<2> ndr(sycl::range<2>(gx, UNROLL_NODES), sycl::range<2>(NODE_KERNEL_BLOCK, UNROLL_NODES));
+	sycl::nd_range<2> ndr(sycl::range<2>(UNROLL_NODES, gx), sycl::range<2>(UNROLL_NODES, NODE_KERNEL_BLOCK));
 
 	q.submit([&](sycl::handler& h) {
 		h.parallel_for(ndr, [=](sycl::nd_item<2> item) {
-			const uint32_t tid = item.get_global_id(0);
-			const uint32_t ty = item.get_local_id(1);
+			const uint32_t tid = item.get_global_id(1);
+			const uint32_t ty = item.get_local_id(0);
 			const uint32_t i = tid % Zc;
 			const uint32_t idx_row = tid / Zc;
 
@@ -172,12 +180,12 @@ static void update_vn_kernel(
 {
 	const uint32_t num_vns = num_cols * Zc;
 	const uint32_t gx = blocks_for(num_vns, NODE_KERNEL_BLOCK) * NODE_KERNEL_BLOCK;
-	sycl::nd_range<2> ndr(sycl::range<2>(gx, UNROLL_NODES), sycl::range<2>(NODE_KERNEL_BLOCK, UNROLL_NODES));
+	sycl::nd_range<2> ndr(sycl::range<2>(UNROLL_NODES, gx), sycl::range<2>(UNROLL_NODES, NODE_KERNEL_BLOCK));
 
 	q.submit([&](sycl::handler& h) {
 		h.parallel_for(ndr, [=](sycl::nd_item<2> item) {
-			const uint32_t tid = item.get_global_id(0);
-			const uint32_t ty = item.get_local_id(1);
+			const uint32_t tid = item.get_global_id(1);
+			const uint32_t ty = item.get_local_id(0);
 			const uint32_t i = tid % Zc;
 			const uint32_t idx_col = tid / Zc;
 

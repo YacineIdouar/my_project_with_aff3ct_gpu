@@ -37,9 +37,10 @@ protected:
 	int seed;
 	std::vector<R> noised_data;  // vector of the noise applied to the signal
 	Cuda_channel* cuda_handler;
+	int dev_id, platform_id;
 
 public:
-	Channel_AWGN_LLR_gpu(const int N, size_t seed = 42);
+	Channel_AWGN_LLR_gpu(const int N, size_t seed = 42, const int dev_id = 0, const int platform_id = 0);
 
 	virtual ~Channel_AWGN_LLR_gpu() = default;
 

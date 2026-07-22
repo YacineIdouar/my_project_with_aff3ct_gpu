@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <vector>
 #include <string>
@@ -15,11 +16,134 @@
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 using namespace aff3ct;
 
+// ---------------------------------------------------------------------------
+// Runtime GPU configuration.
+//
+// Which backend the decoder task runs on, and which device/platform every GPU module targets, used
+// to be baked into the source: a literal '{VULKAN, 0, 0}' at the set_execution_device_info() call
+// sites and a literal 0 in each module constructor. Both are runtime choices now, mirroring the
+// per-task API selection of the motion project. Only backends actually compiled in (the DECODER_*
+// CMake options) are accepted, so requesting one that was not built fails loudly rather than
+// silently falling back to another.
+// ---------------------------------------------------------------------------
+
+static std::string compiled_decoder_apis()
+{
+    std::string list;
+    auto add = [&list](const char* name) { list += list.empty() ? name : std::string(", ") + name; };
+#ifdef DECODER_CUDA
+    add("CUDA");
+#endif
+#ifdef DECODER_HIP
+    add("HIP");
+#endif
+#ifdef DECODER_SYCL
+    add("SYCL");
+#endif
+#ifdef DECODER_VULKAN
+    add("VULKAN");
+#endif
+    return list.empty() ? std::string("<none>") : list;
+}
+
+// VULKAN is tried first so that the default matches the backend this main was previously pinned to.
+static std::string default_decoder_api()
+{
+#if   defined(DECODER_VULKAN)
+    return "VULKAN";
+#elif defined(DECODER_CUDA)
+    return "CUDA";
+#elif defined(DECODER_HIP)
+    return "HIP";
+#elif defined(DECODER_SYCL)
+    return "SYCL";
+#else
+    return "<none>";
+#endif
+}
+
+static spu::device_interface::compute_api str_to_compute_api(const std::string& s, const char* opt)
+{
+#ifdef DECODER_CUDA
+    if (s == "CUDA")   return spu::device_interface::compute_api::CUDA;
+#endif
+#ifdef DECODER_HIP
+    if (s == "HIP")    return spu::device_interface::compute_api::HIP;
+#endif
+#ifdef DECODER_SYCL
+    if (s == "SYCL")   return spu::device_interface::compute_api::SYCL;
+#endif
+#ifdef DECODER_VULKAN
+    if (s == "VULKAN") return spu::device_interface::compute_api::VULKAN;
+#endif
+    std::cerr << "(EE) unsupported '" << opt << "' value '" << s << "' (compiled backends: "
+              << compiled_decoder_apis() << ")" << std::endl;
+    std::exit(1);
+}
+
+// Pulls "--opt <value>" out of argv, erasing both tokens. The AFF3CT factory parser only knows the
+// factory arguments, so leaving ours in place would make it report them as unknown.
+static bool extract_option(std::vector<char*>& args, const char* opt, std::string& out)
+{
+    for (size_t i = 1; i < args.size(); i++)
+    {
+        if (std::strcmp(args[i], opt) != 0) continue;
+        if (i + 1 >= args.size())
+        {
+            std::cerr << "(EE) '" << opt << "' expects a value." << std::endl;
+            std::exit(1);
+        }
+        out = args[i + 1];
+        args.erase(args.begin() + i, args.begin() + i + 2);
+        return true;
+    }
+    return false;
+}
+
+// These are consumed before the factory parser runs, so they never appear in its own help output.
+static void print_gpu_options_help()
+{
+    std::cout << "GPU parameter(s):" << std::endl;
+    std::cout << "  --dev-id  <int>   Device id used by every GPU module                     [0]"
+              << std::endl;
+    std::cout << "  --plt-id  <int>   Platform id (only SYCL indexes devices by platform)    [0]"
+              << std::endl;
+    std::cout << "  --dec-api <api>   Backend running the decoder task, one of {"
+              << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
+    std::cout << std::endl;
+}
+
+static int extract_int_option(std::vector<char*>& args, const char* opt, const int def_value)
+{
+    std::string raw;
+    if (!extract_option(args, opt, raw)) return def_value;
+
+    try
+    {
+        size_t consumed = 0;
+        const int value = std::stoi(raw, &consumed);
+        if (consumed != raw.size() || value < 0) throw std::invalid_argument(raw);
+        return value;
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "(EE) '" << opt << "' expects a non-negative integer (got '" << raw << "')."
+                  << std::endl;
+        std::exit(1);
+    }
+}
+
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
     float  ebn0      = 2.40f; // SNR value
     float  R;                  // code rate (R=K/N)
+
+    int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
+    int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
+    int dec_n_ite   = 10;      // --dec-ite: decoder iterations (read back from the codec factory)
+    spu::device_interface::compute_api dec_api = // --dec-api: backend the decoder task executes on
+        spu::device_interface::compute_api::NATIVE;
 
     std::unique_ptr<factory::Source          > source;
     std::unique_ptr<factory::Codec_LDPC      > codec;
@@ -95,8 +219,10 @@ int main(int argc, char** argv)
     (*m.channel)[   "add_noise_gpu::CP"      ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
 
-	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, 0, 0}, true);
-	(*m.decoder)("decode_siho_gpu").set_execution_device_info({spu::device_interface::compute_api::SYCL, 0, 1}, true);
+	// The channel module only ever registers a CUDA codelet, so its API is structural rather than a
+	// choice; the decoder registers one codelet per compiled backend, so --dec-api picks between them.
+	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, p.dev_id, p.platform_id}, true);
+	(*m.decoder)("decode_siho_gpu").set_execution_device_info({p.dec_api, p.dev_id, p.platform_id}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
 
@@ -149,6 +275,15 @@ int main(int argc, char** argv)
 
 void init_params(int argc, char** argv, params &p)
 {
+    // Consume our GPU options first, then hand what is left to the AFF3CT factory parser.
+    std::vector<char*> args(argv, argv + argc);
+    p.dev_id      = extract_int_option(args, "--dev-id", p.dev_id);
+    p.platform_id = extract_int_option(args, "--plt-id", p.platform_id);
+
+    std::string api_str = default_decoder_api();
+    extract_option(args, "--dec-api", api_str);
+    p.dec_api = str_to_compute_api(api_str, "--dec-api");
+
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
     p.modem    = std::unique_ptr<factory::Modem           >(new factory::Modem           ());
@@ -163,10 +298,11 @@ void init_params(int argc, char** argv, params &p)
                                                    p.terminal.get()                                  };
 
     // parse the command for the given parameters and fill them
-    tools::Command_parser cp(argc, argv, params_list, true);
+    tools::Command_parser cp((int)args.size(), args.data(), params_list, true);
     if (cp.parsing_failed())
     {
         cp.print_help    ();
+        print_gpu_options_help();
         cp.print_warnings();
         cp.print_errors  ();
         std::exit(1);
@@ -174,8 +310,18 @@ void init_params(int argc, char** argv, params &p)
 
     std::cout << "# Simulation parameters: " << std::endl;
     tools::Header::print_parameters(params_list); // display the headers (= print the AFF3CT parameters on the screen)
+    std::cout << "# * GPU ---------------------------------------------" << std::endl;
+    std::cout << "#    ** Device id                     = " << p.dev_id      << std::endl;
+    std::cout << "#    ** Platform id                   = " << p.platform_id << std::endl;
+    std::cout << "#    ** Decoder API                   = " << api_str
+              << " (compiled: " << compiled_decoder_apis() << ")" << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
+
+    // The GPU decoder is built by hand rather than through the codec factory, so take the iteration
+    // count from the factory (i.e. from --dec-ite) instead of repeating a literal at its call site.
+    if (auto* dec_ldpc = dynamic_cast<const factory::Decoder_LDPC*>(p.codec->dec.get()))
+        p.dec_n_ite = dec_ldpc->n_ite;
 
      p.R = (float)p.codec->enc->K / (float)p.puncturer->N; // compute the code rate
 }
@@ -185,12 +331,12 @@ void init_modules(const params &p, modules &m)
     m.source  = std::unique_ptr<spu::module::Source      <>>(p.source ->build());
     m.codec   = std::unique_ptr<     tools ::Codec_SIHO  <>>(p.codec  ->build());
     m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
-	m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed));
+	m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
     //m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
     m.sink    = std::unique_ptr<spu::module::Sink        <>>(p.sink   ->build());
     m.encoder = &m.codec->get_encoder();
-    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, 20);
+    m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dev_id, p.platform_id);
 	//m.decoder = &m.codec->get_decoder_siho();
 	// Building the puncturer
 	std::vector<bool> pct_pattern;
@@ -234,8 +380,18 @@ void init_utils(const params &p, const modules &m, utils &u)
 
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
            .add_first_task((*m.modem)("demodulate")) //                                          first task of the stage
+           .add_last_task((*m.puncturer)("depuncture")) //                                      last  task of the stage
+           .set_n_threads(1)) //          can run on a multiple threads (with replication)
+       // // ------------------------------------------------------------------------------------------------------------
+       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+       	    .set_buffer_size(3) //                                                          synchronization buffer size
+       	    .set_active_waiting(false)) //                                          passive waiting for synchronization
+
+
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+           .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(2)) //          can run on a multiple threads (with replication)
+           .set_n_threads(1)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
        	    .set_buffer_size(3) //                                                          synchronization buffer size

@@ -17,6 +17,7 @@
 #include "Cuda/Decoder_LDPC_cuda_kernel.hpp"
 #include "Hip/Decoder_LDPC_hip_kernel.hpp"
 #include "Sycl/Decoder_LDPC_sycl_kernel.hpp"
+#include "Vulkan/Decoder_LDPC_vulkan_kernel.hpp"
 
 #include "Module/Decoder/Decoder.hpp"
 
@@ -58,8 +59,11 @@ class Decoder_LDPC_BP_flooding_gpu : public Decoder
      * \param K: number of information bits in the frame.
      * \param N: size of one frame.
      * \param nb_iter: number of iterations.
+     * \param dev_id: device id used by the GPU compute API.
+     * \param platform_id: platform id used by the GPU compute API (SYCL only).
      */
-    Decoder_LDPC_BP_flooding_gpu(const int K, const int N_LDPC, const int N_cw, const int nb_iter);
+    Decoder_LDPC_BP_flooding_gpu(const int K, const int N_LDPC, const int N_cw, const int nb_iter,
+                                 const int dev_id = 0, const int platform_id = 0);
 
 	virtual Decoder_LDPC_BP_flooding_gpu<B, R>* clone() const;
 
@@ -88,6 +92,7 @@ class Decoder_LDPC_BP_flooding_gpu : public Decoder
   	sp_cuda::Cuda_decoder* cuda_handler;
 	sp_hip::Hip_decoder* hip_handler;
 	sp_sycl::Sycl_decoder* sycl_handler;
+	sp_vulkan::Vulkan_decoder* vulkan_handler;
 	const int n_ite;
 	const int N_cw;
 	int dev_id, platform_id;

@@ -1,0 +1,33 @@
+#version 450
+/*
+GLSL port of clip_channel_kernel in ../../cuda/Decoder_LDPC_cuda_kernel.cu.
+*/
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InBuf
+{
+    float data[];
+}
+in_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf
+{
+    float data[];
+}
+out_buf;
+
+layout(push_constant) uniform PushConstants
+{
+    uint n;
+}
+pc;
+
+const float MAX_CHANNEL_LLR = 128.0;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid < pc.n) out_buf.data[tid] = clamp(in_buf.data[tid], -MAX_CHANNEL_LLR, MAX_CHANNEL_LLR);
+}

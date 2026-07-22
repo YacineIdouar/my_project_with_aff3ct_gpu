@@ -8,8 +8,9 @@ using namespace aff3ct::module;
 
 template <typename R>
 Channel_AWGN_LLR_gpu<R>
-::Channel_AWGN_LLR_gpu(const int N, const size_t seed)
+::Channel_AWGN_LLR_gpu(const int N, const size_t seed, const int dev_id, const int platform_id)
 : spu::module::Stateful(), N(N), total_size(N), seed(seed), noised_data(this->N * this->n_frames, 0)
+, dev_id(dev_id), platform_id(platform_id)
 {
 	const std::string name = "Channel_gpu";
 	this->set_name(name);
@@ -37,8 +38,8 @@ Channel_AWGN_LLR_gpu<R>
 	auto p1s_Y_N = this->template create_socket_out<R    >(p1, "Y_N", this->N);
 
 	// Setting GPU task
-	size_t p1_cuda_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::CUDA, 0, 0);
-	this->cuda_handler = new Cuda_channel(0);
+	size_t p1_cuda_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::CUDA, this->dev_id, this->platform_id);
+	this->cuda_handler = new Cuda_channel(this->dev_id);
 	this->cuda_handler->init_rand_state(this->N, this->seed);
 
 	this->register_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N, p1_cuda_stream](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int

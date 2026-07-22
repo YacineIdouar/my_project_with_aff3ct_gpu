@@ -1,0 +1,116 @@
+#version 450
+/*
+GLSL port of update_cn_kernel in ../../cuda/Decoder_LDPC_cuda_kernel.cu.
+
+The CUDA/HIP kernels are launched with a 2D block (NODE_KERNEL_BLOCK, UNROLL_NODES)
+where UNROLL_NODES == 1 in this codebase, so threadIdx.y is always 0 and the
+`for (ii = threadIdx.y; ii < cn_degree; ii += UNROLL_NODES)` loop degenerates to a
+plain `for (ii = 0; ii < cn_degree; ii++)` -- reproduced directly here rather than
+carrying the always-0 dimension through, since GLSL has no exact threadIdx.y
+equivalent worth keeping for a constant-1 unroll factor.
+
+bg_cn packs one { uint16 vn; uint16 s; } pair per uint (vn in the low 16 bits, s in
+the high 16 bits), matching the host-side upload of Module/Decoder_gpu/ldpc_tables_bg{1,2}.hpp's
+`{uint16_t vn; uint16_t s;}` tables through a raw uint32_t* copy.
+*/
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) readonly buffer LlrTotalBuf
+{
+    float data[];
+}
+llr_total;
+
+layout(set = 0, binding = 1) buffer LlrMsgBuf
+{
+    float data[];
+}
+llr_msg;
+
+layout(set = 0, binding = 2) readonly buffer BgCnBuf
+{
+    uint data[];
+}
+bg_cn;
+
+layout(set = 0, binding = 3) readonly buffer BgCnDegreeBuf
+{
+    uint data[];
+}
+bg_cn_degree;
+
+layout(push_constant) uniform PushConstants
+{
+    uint Zc;
+    uint cn_stride;
+    uint num_rows;
+    uint first_iter;
+}
+pc;
+
+const float OMS_OFFSET = 0.5;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    uint i = tid % pc.Zc;
+    uint idx_row = tid / pc.Zc;
+
+    if (idx_row >= pc.num_rows) return;
+
+    uint cn_degree = bg_cn_degree.data[idx_row];
+    uint check_base = idx_row * pc.cn_stride;
+
+    float min_1 = 1e38;
+    float min_2 = 1e38;
+    int idx_min = -1;
+    int node_sign = 1;
+    uint msg_signs = 0u;
+
+    for (uint ii = 0u; ii < cn_degree; ii++)
+    {
+        uint cn = bg_cn.data[check_base + ii];
+        uint idx_col = cn & 0xffffu;
+        uint s = cn >> 16;
+        uint msg_offset = idx_row + idx_col * pc.num_rows;
+        uint msg_idx = msg_offset * pc.Zc + i;
+
+        float t = llr_total.data[idx_col * pc.Zc + (i + s) % pc.Zc];
+
+        if (pc.first_iter == 0u) t -= llr_msg.data[msg_idx];
+
+        int sign = (t >= 0.0) ? 1 : -1;
+        node_sign *= sign;
+        if (t < 0.0) msg_signs |= (1u << ii);
+
+        float t_abs = abs(t);
+        if (t_abs < min_1)
+        {
+            min_2 = min_1;
+            min_1 = t_abs;
+            idx_min = int(msg_idx);
+        }
+        else if (t_abs < min_2)
+        {
+            min_2 = t_abs;
+        }
+    }
+
+    min_1 = max(0.0, min_1 - OMS_OFFSET);
+    min_2 = max(0.0, min_2 - OMS_OFFSET);
+
+    for (uint ii = 0u; ii < cn_degree; ii++)
+    {
+        uint cn = bg_cn.data[check_base + ii];
+        uint idx_col = cn & 0xffffu;
+        uint msg_offset = idx_row + idx_col * pc.num_rows;
+        uint msg_idx = msg_offset * pc.Zc + i;
+
+        float min_val = (int(msg_idx) == idx_min) ? min_2 : min_1;
+        int msg_sign = (((msg_signs >> ii) & 0x1u) != 0u) ? -1 : 1;
+
+        llr_msg.data[msg_idx] = min_val * float(node_sign * msg_sign);
+    }
+}

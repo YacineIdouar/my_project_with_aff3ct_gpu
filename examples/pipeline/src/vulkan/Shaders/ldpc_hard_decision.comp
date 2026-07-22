@@ -1,0 +1,31 @@
+#version 450
+/*
+GLSL port of hard_decision_kernel in ../../cuda/Decoder_LDPC_cuda_kernel.cu.
+*/
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer LlrTotalBuf
+{
+    float data[];
+}
+llr_total;
+
+layout(set = 0, binding = 1) writeonly buffer BitsBuf
+{
+    int data[];
+}
+bits;
+
+layout(push_constant) uniform PushConstants
+{
+    uint block_length;
+}
+pc;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid < pc.block_length) bits.data[tid] = (llr_total.data[tid] < 0.0) ? 1 : 0;
+}
