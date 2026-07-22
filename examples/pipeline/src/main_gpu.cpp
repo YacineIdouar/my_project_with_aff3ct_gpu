@@ -81,6 +81,26 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
     std::exit(1);
 }
 
+// The channel module exists in two unrelated flavours: the AFF3CT factory one (CPU) and the CUDA one
+// declared in this example. They share their socket names but not their task name, so the choice has
+// to be carried around at bind time.
+enum class channel_impl { CPU, CUDA };
+
+static const char* channel_task_name(const channel_impl impl)
+{
+    return impl == channel_impl::CUDA ? "add_noise_gpu" : "add_noise";
+}
+
+static channel_impl str_to_channel_impl(const std::string& s, const char* opt)
+{
+    if (s == "CPU")  return channel_impl::CPU;
+    if (s == "CUDA") return channel_impl::CUDA;
+
+    std::cerr << "(EE) unsupported '" << opt << "' value '" << s << "' (expected CPU or CUDA)"
+              << std::endl;
+    std::exit(1);
+}
+
 // Pulls "--opt <value>" out of argv, erasing both tokens. The AFF3CT factory parser only knows the
 // factory arguments, so leaving ours in place would make it report them as unknown.
 static bool extract_option(std::vector<char*>& args, const char* opt, std::string& out)
@@ -110,6 +130,8 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "  --dec-api <api>   Backend running the decoder task, one of {"
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
+    std::cout << "  --chn-api <api>   Channel implementation, one of {CPU, CUDA}             [CUDA]"
+              << std::endl;
     std::cout << std::endl;
 }
 
@@ -144,6 +166,7 @@ struct params
     int dec_n_ite   = 10;      // --dec-ite: decoder iterations (read back from the codec factory)
     spu::device_interface::compute_api dec_api = // --dec-api: backend the decoder task executes on
         spu::device_interface::compute_api::NATIVE;
+    channel_impl chn_api = channel_impl::CUDA; // --chn-api: CPU or CUDA channel module
 
     std::unique_ptr<factory::Source          > source;
     std::unique_ptr<factory::Codec_LDPC      > codec;
@@ -160,8 +183,12 @@ struct modules
 {
     std::unique_ptr<spu::module::Source<>>       source;
     std::unique_ptr<     module::Modem<>>        modem;
-    //std::unique_ptr<     module::Channel<>>      channel;
-	std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel;
+    // Exactly one of the two channels below is built (see --chn-api); 'channel' aliases it and
+    // 'channel_task' names its single task, both flavours exposing the same CP/X_N/Y_N sockets.
+    std::unique_ptr<     module::Channel<>>                     channel_cpu;
+	std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel_gpu;
+                    spu::module::Module*                        channel = nullptr;
+                         std::string                            channel_task;
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
     std::unique_ptr<spu::module::Sink<>>         sink;
     std::unique_ptr<     tools ::Codec_SIHO<>>   codec;
@@ -205,10 +232,8 @@ int main(int argc, char** argv)
     (*m.encoder)[      "encode::U_K"     ] = (*m.source )[   "generate::out_data" ];
 	(*m.puncturer)[    "puncture::X_N1" ]  = (*m.encoder)[     "encode::X_N"      ];
     (*m.modem  )[    "modulate::X_N1"    ] = (*m.puncturer)[      "puncture::X_N2" ];
-	(*m.channel)[   "add_noise_gpu::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
-    (*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise_gpu::Y_N"      ];
-    //(*m.channel)[   "add_noise::X_N"     ] = (*m.modem  )[   "modulate::X_N2"     ];
-    //(*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[  "add_noise::Y_N"      ];
+	(*m.channel)[ m.channel_task + "::X_N" ] = (*m.modem  )[   "modulate::X_N2"     ];
+    (*m.modem  )[  "demodulate::Y_N1"    ] = (*m.channel)[ m.channel_task + "::Y_N" ];
 	(*m.puncturer)[ "depuncture::Y_N1"   ] = (*m.modem  )[ "demodulate::Y_N2"     ];
     (*m.decoder)[ "decode_siho_gpu::Y_N" ]  = (*m.puncturer)[ "depuncture::Y_N2"    ];
     (*m.monitor)["check_errors::U"       ] = (*m.source )[   "generate::out_data" ];
@@ -216,12 +241,14 @@ int main(int argc, char** argv)
     (*m.sink   )[  "send_count::in_count"] = (*m.source )[   "generate::out_count"];
     (*m.sink   )[  "send_count::in_data" ] = (*m.decoder)["decode_siho_gpu::V_K"      ];
     std::vector<float> sigma(1);
-    (*m.channel)[   "add_noise_gpu::CP"      ] = sigma;
+    (*m.channel)[ m.channel_task + "::CP" ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
 
-	// The channel module only ever registers a CUDA codelet, so its API is structural rather than a
-	// choice; the decoder registers one codelet per compiled backend, so --dec-api picks between them.
-	(*m.channel)("add_noise_gpu").set_execution_device_info({spu::device_interface::compute_api::CUDA, p.dev_id, p.platform_id}, true);
+	// The GPU channel only ever registers a CUDA codelet, so its API is structural rather than a
+	// choice; the CPU one has no device info to set at all. The decoder registers one codelet per
+	// compiled backend, so --dec-api picks between them.
+	if (p.chn_api == channel_impl::CUDA)
+		(*m.channel)(m.channel_task).set_execution_device_info({spu::device_interface::compute_api::CUDA, p.dev_id, p.platform_id}, true);
 	(*m.decoder)("decode_siho_gpu").set_execution_device_info({p.dec_api, p.dev_id, p.platform_id}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
@@ -284,6 +311,10 @@ void init_params(int argc, char** argv, params &p)
     extract_option(args, "--dec-api", api_str);
     p.dec_api = str_to_compute_api(api_str, "--dec-api");
 
+    std::string chn_str = "CUDA";
+    extract_option(args, "--chn-api", chn_str);
+    p.chn_api = str_to_channel_impl(chn_str, "--chn-api");
+
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
     p.modem    = std::unique_ptr<factory::Modem           >(new factory::Modem           ());
@@ -315,6 +346,7 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#    ** Platform id                   = " << p.platform_id << std::endl;
     std::cout << "#    ** Decoder API                   = " << api_str
               << " (compiled: " << compiled_decoder_apis() << ")" << std::endl;
+    std::cout << "#    ** Channel API                   = " << chn_str << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
@@ -331,8 +363,17 @@ void init_modules(const params &p, modules &m)
     m.source  = std::unique_ptr<spu::module::Source      <>>(p.source ->build());
     m.codec   = std::unique_ptr<     tools ::Codec_SIHO  <>>(p.codec  ->build());
     m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
-	m.channel = std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
-    //m.channel = std::unique_ptr<     module::Channel     <>>(p.channel->build());
+	if (p.chn_api == channel_impl::CUDA)
+	{
+		m.channel_gpu = std::unique_ptr<module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
+		m.channel     = m.channel_gpu.get();
+	}
+	else
+	{
+		m.channel_cpu = std::unique_ptr<module::Channel<>>(p.channel->build());
+		m.channel     = m.channel_cpu.get();
+	}
+	m.channel_task = channel_task_name(p.chn_api);
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
     m.sink    = std::unique_ptr<spu::module::Sink        <>>(p.sink   ->build());
     m.encoder = &m.codec->get_encoder();
@@ -370,8 +411,8 @@ void init_utils(const params &p, const modules &m, utils &u)
             .set_active_waiting(false)) //                                          passive waiting for synchronization
 
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
-            .add_first_task((*m.channel)("add_noise_gpu")) //                                          first task of the stage
-            .add_last_task((*m.channel)("add_noise_gpu"))  //                                      last  task of the stage
+            .add_first_task((*m.channel)(m.channel_task)) //                                          first task of the stage
+            .add_last_task((*m.channel)(m.channel_task))  //                                      last  task of the stage
             .set_n_threads(2)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
