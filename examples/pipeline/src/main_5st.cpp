@@ -132,6 +132,12 @@ static void print_gpu_options_help()
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
     std::cout << "  --chn-api <api>   Channel implementation, one of {CPU, CUDA}             [CUDA]"
               << std::endl;
+    std::cout << "  --snr-min  <flt>  First Eb/N0 (dB) of the sweep                          [1.00]"
+              << std::endl;
+    std::cout << "  --snr-max  <flt>  Sweep runs while Eb/N0 < this value (dB)               [4.01]"
+              << std::endl;
+    std::cout << "  --snr-step <flt>  Eb/N0 increment (dB) between points                    [0.25]"
+              << std::endl;
     std::cout << std::endl;
 }
 
@@ -155,10 +161,32 @@ static int extract_int_option(std::vector<char*>& args, const char* opt, const i
     }
 }
 
+static float extract_float_option(std::vector<char*>& args, const char* opt, const float def_value)
+{
+    std::string raw;
+    if (!extract_option(args, opt, raw)) return def_value;
+
+    try
+    {
+        size_t consumed = 0;
+        const float value = std::stof(raw, &consumed);
+        if (consumed != raw.size()) throw std::invalid_argument(raw);
+        return value;
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "(EE) '" << opt << "' expects a real number (got '" << raw << "')." << std::endl;
+        std::exit(1);
+    }
+}
+
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
-    float  ebn0      = 2.40f; // SNR value
+    float  ebn0      = 2.40f; // SNR value (single point, kept for reference)
+    float  ebn0_min  = 0.00f; // --snr-min:  first Eb/N0 of the sweep
+    float  ebn0_max  = 4.01f; // --snr-max:  loop runs while ebn0 < ebn0_max
+    float  ebn0_step = 0.25f; // --snr-step: Eb/N0 increment between points
     float  R;                  // code rate (R=K/N)
 
     int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
@@ -268,24 +296,40 @@ int main(int argc, char** argv)
     for (auto &m : u.pipeline->get_modules<spu::tools::Interface_set_seed>())
         m->set_seed(prng());
 
-    // compute the current sigma for the channel noise
-    const auto esn0 = tools::ebn0_to_esn0(p.ebn0, p.R, p.modem->bps);
-    std::fill(sigma.begin(), sigma.end(), tools::esn0_to_sigma(esn0, p.modem->cpm_upf));
-
-    u.noise->set_values(sigma[0], p.ebn0, esn0);
-
-    // display the performance (BER and FER) in real time (in a separate thread)
+    // display the BER/FER legend once, before sweeping the SNRs
     u.terminal->legend();
-    u.terminal->start_temp_report();
 
-    // will automatically stop when `m.source->is_done()` will be `true` (end of input file) or if user press `Ctrl+c`
-    u.pipeline->exec([&m]() -> bool
-        {
-            return m.monitor->is_done();
-        });
+    // loop over the various SNRs (Eb/N0), simulating the BER/FER at each point
+    for (auto ebn0 = p.ebn0_min; ebn0 < p.ebn0_max; ebn0 += p.ebn0_step)
+    {
+        // compute the current sigma for the channel noise
+        const auto esn0 = tools::ebn0_to_esn0(ebn0, p.R, p.modem->bps);
+        std::fill(sigma.begin(), sigma.end(), tools::esn0_to_sigma(esn0, p.modem->cpm_upf));
 
-    // display the performance (BER and FER) in the terminal
-    u.terminal->final_report();
+        // set_values fires the recorded callbacks, propagating the new noise to every module
+        u.noise->set_values(sigma[0], ebn0, esn0);
+
+        // display the performance (BER and FER) in real time (in a separate thread)
+        u.terminal->start_temp_report();
+
+        // run the pipeline until the monitor has gathered enough errors (is_done()) for this SNR,
+        // the input file ends, or the user presses Ctrl+c
+        u.pipeline->exec([&m]() -> bool
+            {
+                return m.monitor->is_done();
+            });
+
+        // display the performance (BER and FER) for this SNR in the terminal
+        u.terminal->final_report();
+
+        // reset the monitor error counters before moving on to the next SNR
+        m.monitor->reset();
+
+        // stop the whole sweep if the user requested an interruption (Ctrl+c); otherwise the
+        // remaining SNRs would be skipped through instantly as exec() keeps returning on the signal
+        if (spu::tools::Signal_handler::is_sigint())
+            break;
+    }
 
     // display the statistics of the tasks (if enabled)
     auto stages = u.pipeline->get_stages();
@@ -314,6 +358,16 @@ void init_params(int argc, char** argv, params &p)
     std::string chn_str = "CUDA";
     extract_option(args, "--chn-api", chn_str);
     p.chn_api = str_to_channel_impl(chn_str, "--chn-api");
+
+    p.ebn0_min  = extract_float_option(args, "--snr-min",  p.ebn0_min);
+    p.ebn0_max  = extract_float_option(args, "--snr-max",  p.ebn0_max);
+    p.ebn0_step = extract_float_option(args, "--snr-step", p.ebn0_step);
+    if (p.ebn0_step <= 0.f)
+    {
+        std::cerr << "(EE) '--snr-step' must be strictly positive (got " << p.ebn0_step << ")."
+                  << std::endl;
+        std::exit(1);
+    }
 
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
@@ -347,6 +401,9 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#    ** Decoder API                   = " << api_str
               << " (compiled: " << compiled_decoder_apis() << ")" << std::endl;
     std::cout << "#    ** Channel API                   = " << chn_str << std::endl;
+    std::cout << "#    ** SNR min  (Eb/N0, dB)          = " << p.ebn0_min  << std::endl;
+    std::cout << "#    ** SNR max  (Eb/N0, dB)          = " << p.ebn0_max  << std::endl;
+    std::cout << "#    ** SNR step (Eb/N0, dB)          = " << p.ebn0_step << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
