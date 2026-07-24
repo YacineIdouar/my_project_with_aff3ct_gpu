@@ -195,8 +195,14 @@ add_executable(pipeline_gpu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main_gpu.cpp
 )
 
+add_executable(pipeline_5st
+    ${link-objects}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main_5st.cpp
+)
+
 target_include_directories(pipeline_cpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(pipeline_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(pipeline_5st PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 target_link_libraries(pipeline_cpu PRIVATE
     aff3ct::aff3ct-static-lib
@@ -208,34 +214,47 @@ target_link_libraries(pipeline_gpu PRIVATE
     Threads::Threads
 )
 
+target_link_libraries(pipeline_5st PRIVATE
+    aff3ct::aff3ct-static-lib
+    Threads::Threads
+)
+
 # --- ADDED: Guard definitions for the main executable ---
 if(DECODER_CUDA)
     target_compile_definitions(pipeline_cpu PRIVATE DECODER_CUDA)
     target_compile_definitions(pipeline_gpu PRIVATE DECODER_CUDA)
+    target_compile_definitions(pipeline_5st PRIVATE DECODER_CUDA)
 endif()
 
 if(DECODER_HIP)
     target_compile_definitions(pipeline_cpu PRIVATE DECODER_HIP)
     target_compile_definitions(pipeline_gpu PRIVATE DECODER_HIP)
+    target_compile_definitions(pipeline_5st PRIVATE DECODER_HIP)
 endif()
 
 if(DECODER_SYCL)
     target_compile_definitions(pipeline_cpu PRIVATE DECODER_SYCL)
     target_compile_definitions(pipeline_gpu PRIVATE DECODER_SYCL)
+    target_compile_definitions(pipeline_5st PRIVATE DECODER_SYCL)
     target_link_libraries(pipeline_cpu PRIVATE obj-sycl)
     target_link_libraries(pipeline_gpu PRIVATE obj-sycl)
+    target_link_libraries(pipeline_5st PRIVATE obj-sycl)
     if(SYCL_COMPILER STREQUAL "oneapi")
         target_link_options(pipeline_cpu PRIVATE -fsycl -fsycl-targets=${SYCL_BACKEND})
         target_link_options(pipeline_gpu PRIVATE -fsycl -fsycl-targets=${SYCL_BACKEND})
+        target_link_options(pipeline_5st PRIVATE -fsycl -fsycl-targets=${SYCL_BACKEND})
     elseif(SYCL_COMPILER STREQUAL "acpp")
         target_link_options(pipeline_cpu PRIVATE --acpp-targets=generic)
         target_link_options(pipeline_gpu PRIVATE --acpp-targets=generic)
+        target_link_options(pipeline_5st PRIVATE --acpp-targets=generic)
     endif()
 endif()
 
 if(DECODER_VULKAN)
     target_compile_definitions(pipeline_cpu PRIVATE DECODER_VULKAN)
     target_compile_definitions(pipeline_gpu PRIVATE DECODER_VULKAN)
+    target_compile_definitions(pipeline_5st PRIVATE DECODER_VULKAN)
     target_link_libraries(pipeline_cpu PRIVATE Vulkan::Vulkan)
     target_link_libraries(pipeline_gpu PRIVATE Vulkan::Vulkan)
+    target_link_libraries(pipeline_5st PRIVATE Vulkan::Vulkan)
 endif()
