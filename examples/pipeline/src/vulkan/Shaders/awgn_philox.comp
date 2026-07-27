@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+Vulkan port of awgn_add_noise_philox in ../../cuda/Channel_AWGN_LLR_prng_cuda.cu.
+
+The generator itself is shared with the CUDA path in spirit and line-for-line in code: this
+shader includes the GLSL transliteration of include/Rng/Philox4x32.hpp, so the index/counter/
+seed arithmetic and the Box-Muller step are identical. For the same (n, sigma, seed, counter)
+and the same dispatch geometry, this produces bit-identical noise to the CUDA kernel.
+*/
+#include "philox4x32.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InBuf
+{
+    float data[];
+}
+in_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf
+{
+    float data[];
+}
+out_buf;
+
+layout(push_constant) uniform PushConstants
+{
+    uint  n;       // number of samples
+    float sigma;   // noise standard deviation
+    uint  seed_lo; // Philox key word 0
+    uint  seed_hi; // Philox key word 1
+    uint  ctr_lo;  // per-dispatch counter, low  32 bits
+    uint  ctr_hi;  // per-dispatch counter, high 32 bits
+}
+pc;
+
+const uint SAMPLES_PER_THREAD = 4u; // one Philox4x32 draw feeds exactly four samples
+
+void
+main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    // Same layout as the CUDA kernel: invocation idx owns idx, idx+stride, idx+2*stride,
+    // idx+3*stride, so neighbouring invocations touch neighbouring addresses.
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (idx >= pc.n) return;
+
+    vec4 noise = philox_awgn_noise4(idx, pc.ctr_lo, pc.ctr_hi, pc.seed_lo, pc.seed_hi);
+
+    for (uint k = 0u; k < SAMPLES_PER_THREAD; k++)
+    {
+        uint i = idx + k * stride;
+        if (i < pc.n) out_buf.data[i] = in_buf.data[i] + pc.sigma * noise[k];
+    }
+}

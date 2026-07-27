@@ -22,6 +22,7 @@ instead of one round trip per kernel launch).
 #include <vulkan/vulkan.h>
 
 #include "Vulkan/Decoder_LDPC_vulkan_kernel.hpp"
+#include "Vulkan/vulkan_submit_lock.hpp"
 #include "Device/Devices_manager.hpp"
 #include "Device/Vulkan/Vulkan_device.hpp"
 #include "Device/Vulkan/Vulkan_executor.hpp"
@@ -287,7 +288,11 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 	// (see VULKAN_device::flush_memory -- a no-op when the allocation landed on coherent memory).
 	spu::Devices_manager::flush_vulkan_memory(device_id, reinterpret_cast<uint8_t*>(const_cast<float*>(llr_in)));
 
-	exec.dispatch_chain_and_wait(chain);
+	{
+		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
+		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
+		exec.dispatch_chain_and_wait(chain);
+	}
 
 	// The hard-decision dispatch just wrote llr_bits_out (this task's V_K socket), which the
 	// downstream native tasks (the monitor's check_errors and the sink's send_count) read directly

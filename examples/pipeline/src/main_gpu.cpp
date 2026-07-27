@@ -14,6 +14,7 @@
 #include <aff3ct.hpp>
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
+#include "Module/Channel/Channel_AWGN_LLR_prng_gpu.hpp"
 using namespace aff3ct;
 
 // ---------------------------------------------------------------------------
@@ -81,23 +82,44 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
     std::exit(1);
 }
 
-// The channel module exists in two unrelated flavours: the AFF3CT factory one (CPU) and the CUDA one
-// declared in this example. They share their socket names but not their task name, so the choice has
-// to be carried around at bind time.
-enum class channel_impl { CPU, CUDA };
+// The channel module exists in three unrelated flavours: the AFF3CT factory one (CPU), the cuRAND
+// one declared in this example (CUDA), and the library-free one (Channel_AWGN_LLR_prng_gpu), whose
+// hand-written Philox4x32-10 generator is dispatched either through CUDA (CUDA_PRNG) or through
+// Vulkan (VULKAN_PRNG) -- one codelet per backend on a single task, exactly like the decoder, so
+// those two differ only by the compute_api set on the task. All flavours share their socket names,
+// and all the GPU ones share their task name, but the CPU one does not, so the choice has to be
+// carried around at bind time.
+enum class channel_impl { CPU, CUDA, CUDA_PRNG, VULKAN_PRNG };
 
 static const char* channel_task_name(const channel_impl impl)
 {
-    return impl == channel_impl::CUDA ? "add_noise_gpu" : "add_noise";
+    return impl == channel_impl::CPU ? "add_noise" : "add_noise_gpu";
 }
 
+// Which of Channel_AWGN_LLR_prng_gpu's codelets to run. Only meaningful for the *_PRNG values;
+// the cuRAND module registers a CUDA codelet and nothing else.
+static spu::device_interface::compute_api channel_compute_api(const channel_impl impl)
+{
+    return impl == channel_impl::VULKAN_PRNG ? spu::device_interface::compute_api::VULKAN
+                                             : spu::device_interface::compute_api::CUDA;
+}
+
+// Only backends actually compiled in are accepted, mirroring str_to_compute_api(): asking for one
+// that was not built fails loudly rather than silently falling back to another.
 static channel_impl str_to_channel_impl(const std::string& s, const char* opt)
 {
-    if (s == "CPU")  return channel_impl::CPU;
-    if (s == "CUDA") return channel_impl::CUDA;
+    if (s == "CPU")            return channel_impl::CPU;
+#ifdef DECODER_CUDA
+    if (s == "CUDA")           return channel_impl::CUDA;
+    if (s == "CUDA_PRNG")      return channel_impl::CUDA_PRNG;
+#endif
+#ifdef DECODER_VULKAN
+    if (s == "VULKAN_PRNG")    return channel_impl::VULKAN_PRNG;
+#endif
 
-    std::cerr << "(EE) unsupported '" << opt << "' value '" << s << "' (expected CPU or CUDA)"
-              << std::endl;
+    std::cerr << "(EE) unsupported '" << opt << "' value '" << s
+              << "' (expected CPU, or one of CUDA/CUDA_PRNG/VULKAN_PRNG among the compiled "
+              << "backends: " << compiled_decoder_apis() << ")" << std::endl;
     std::exit(1);
 }
 
@@ -130,8 +152,11 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "  --dec-api <api>   Backend running the decoder task, one of {"
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
-    std::cout << "  --chn-api <api>   Channel implementation, one of {CPU, CUDA}             [CUDA]"
+    std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
               << std::endl;
+    std::cout << "                    {CPU, CUDA, CUDA_PRNG, VULKAN_PRNG}"                       << std::endl;
+    std::cout << "                    CUDA uses cuRAND; CUDA_PRNG and VULKAN_PRNG run the same"  << std::endl;
+    std::cout << "                    hand-written Philox4x32-10 generator on either backend"    << std::endl;
     std::cout << std::endl;
 }
 
@@ -183,10 +208,13 @@ struct modules
 {
     std::unique_ptr<spu::module::Source<>>       source;
     std::unique_ptr<     module::Modem<>>        modem;
-    // Exactly one of the two channels below is built (see --chn-api); 'channel' aliases it and
-    // 'channel_task' names its single task, both flavours exposing the same CP/X_N/Y_N sockets.
+    // Exactly one of the three channels below is built (see --chn-api); 'channel' aliases it and
+    // 'channel_task' names its single task, all flavours exposing the same CP/X_N/Y_N sockets.
+    // channel_gpu_prng serves both CUDA_PRNG and VULKAN_PRNG -- they differ only by the codelet
+    // the task is told to execute.
     std::unique_ptr<     module::Channel<>>                     channel_cpu;
 	std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel_gpu;
+	std::unique_ptr<module::Channel_AWGN_LLR_prng_gpu<float>>   channel_gpu_prng;
                     spu::module::Module*                        channel = nullptr;
                          std::string                            channel_task;
     std::unique_ptr<     module::Monitor_BFER<>> monitor;
@@ -247,8 +275,8 @@ int main(int argc, char** argv)
 	// The GPU channel only ever registers a CUDA codelet, so its API is structural rather than a
 	// choice; the CPU one has no device info to set at all. The decoder registers one codelet per
 	// compiled backend, so --dec-api picks between them.
-	if (p.chn_api == channel_impl::CUDA)
-		(*m.channel)(m.channel_task).set_execution_device_info({spu::device_interface::compute_api::CUDA, p.dev_id, p.platform_id}, true);
+	if (p.chn_api != channel_impl::CPU)
+		(*m.channel)(m.channel_task).set_execution_device_info({channel_compute_api(p.chn_api), p.dev_id, p.platform_id}, true);
 	(*m.decoder)("decode_siho_gpu").set_execution_device_info({p.dec_api, p.dev_id, p.platform_id}, true);
 
     utils u; init_utils(p, m, u); // create and initialize the utils
@@ -368,6 +396,11 @@ void init_modules(const params &p, modules &m)
 		m.channel_gpu = std::unique_ptr<module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel     = m.channel_gpu.get();
 	}
+	else if (p.chn_api == channel_impl::CUDA_PRNG || p.chn_api == channel_impl::VULKAN_PRNG)
+	{
+		m.channel_gpu_prng = std::unique_ptr<module::Channel_AWGN_LLR_prng_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_prng_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
+		m.channel          = m.channel_gpu_prng.get();
+	}
 	else
 	{
 		m.channel_cpu = std::unique_ptr<module::Channel<>>(p.channel->build());
@@ -428,11 +461,10 @@ void init_utils(const params &p, const modules &m, utils &u)
        	    .set_buffer_size(3) //                                                          synchronization buffer size
        	    .set_active_waiting(false)) //                                          passive waiting for synchronization
 
-
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(1)) //          can run on a multiple threads (with replication)
+           .set_n_threads(2)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
        	    .set_buffer_size(3) //                                                          synchronization buffer size

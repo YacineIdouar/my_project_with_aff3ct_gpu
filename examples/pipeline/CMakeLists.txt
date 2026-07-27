@@ -130,19 +130,25 @@ if(DECODER_VULKAN)
 
     set(VULKAN_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan")
     set(VULKAN_EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake")
-    set(VULKAN_SHADER_NAMES ldpc_clip_channel ldpc_update_cn ldpc_update_vn ldpc_hard_decision)
+    set(VULKAN_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/Shaders")
+    set(VULKAN_SHADER_NAMES ldpc_clip_channel ldpc_update_cn ldpc_update_vn ldpc_hard_decision
+                            awgn_philox)
+    # .glsl files are not compiled on their own: they are #include'd by the .comp shaders above
+    # (GL_GOOGLE_include_directive, resolved by glslc -I). Listed here only so that editing one
+    # re-triggers the shaders that include it.
+    file(GLOB VULKAN_SHADER_INCLUDES "${VULKAN_SHADER_DIR}/*.glsl")
     set(VULKAN_SHADER_HEADERS "")
     foreach(shader_name ${VULKAN_SHADER_NAMES})
-        set(shader_src "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/Shaders/${shader_name}.comp")
+        set(shader_src "${VULKAN_SHADER_DIR}/${shader_name}.comp")
         set(shader_spv "${VULKAN_GENERATED_DIR}/${shader_name}.spv")
         set(shader_header "${VULKAN_GENERATED_DIR}/${shader_name}_spv.hpp")
         add_custom_command(
             OUTPUT "${shader_header}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${VULKAN_GENERATED_DIR}"
-            COMMAND ${GLSLC_EXECUTABLE} "${shader_src}" -o "${shader_spv}"
+            COMMAND ${GLSLC_EXECUTABLE} -I "${VULKAN_SHADER_DIR}" "${shader_src}" -o "${shader_spv}"
             COMMAND ${CMAKE_COMMAND} -DSPV_FILE=${shader_spv} -DOUT_FILE=${shader_header}
                     -DSYMBOL=${shader_name}_spv -P "${VULKAN_EMBED_SCRIPT}"
-            DEPENDS "${shader_src}" "${VULKAN_EMBED_SCRIPT}"
+            DEPENDS "${shader_src}" "${VULKAN_EMBED_SCRIPT}" ${VULKAN_SHADER_INCLUDES}
             COMMENT "Compiling and embedding Vulkan shader ${shader_name}.comp"
         )
         list(APPEND VULKAN_SHADER_HEADERS "${shader_header}")
