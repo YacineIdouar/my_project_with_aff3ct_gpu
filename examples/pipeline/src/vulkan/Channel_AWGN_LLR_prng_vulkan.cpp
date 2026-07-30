@@ -125,14 +125,14 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
-	spu::Devices_manager::flush_vulkan_memory(
-		device_id, reinterpret_cast<uint8_t*>(const_cast<float*>(d_x)));
-
+	// The flush of d_x and the invalidate of d_y that used to bracket this dispatch have been
+	// removed. They only did anything when allocate_memory() fell back to a cached, non-coherent
+	// memory type (see VULKAN_device::allocate_memory / flush_memory / invalidate_memory -- both
+	// are no-ops on coherent allocations, which is what a unified-memory part like Orin gives).
+	// Restore them if a platform ever reports corrupted samples.
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
 		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
 		exec.dispatch_chain_and_wait(chain);
 	}
-
-	spu::Devices_manager::invalidate_vulkan_memory(device_id, reinterpret_cast<uint8_t*>(d_y));
 }

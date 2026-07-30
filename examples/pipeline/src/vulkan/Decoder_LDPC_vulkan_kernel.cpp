@@ -283,10 +283,11 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
-	// llr_in was just written by the upstream native task feeding this task's Y_N socket (the
-	// puncturer's depuncture); make sure the GPU sees it before the first dispatch reads it
-	// (see VULKAN_device::flush_memory -- a no-op when the allocation landed on coherent memory).
-	spu::Devices_manager::flush_vulkan_memory(device_id, reinterpret_cast<uint8_t*>(const_cast<float*>(llr_in)));
+	// The flush of llr_in that used to sit here has been removed: llr_in is written by the upstream
+	// native task (the puncturer's depuncture) and read by the first dispatch, so it is only needed
+	// when allocate_memory() fell back to a cached, non-coherent memory type (see
+	// VULKAN_device::allocate_memory / flush_memory -- it is a no-op on coherent allocations).
+	// Restore it if a platform ever reports corrupted LLRs.
 
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
@@ -294,13 +295,11 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 		exec.dispatch_chain_and_wait(chain);
 	}
 
-	// The hard-decision dispatch just wrote llr_bits_out (this task's V_K socket), which the
-	// downstream native tasks (the monitor's check_errors and the sink's send_count) read directly
-	// from the CPU once this call returns. dispatch_chain_and_wait() already fence-waited, so the
-	// write itself is done, but on hardware where allocate_memory() had to fall back to a
-	// cached-but-non-coherent memory type (see VULKAN_device::allocate_memory) the CPU's view of it
-	// can still be stale until invalidated.
-	spu::Devices_manager::invalidate_vulkan_memory(device_id, reinterpret_cast<uint8_t*>(llr_bits_out));
+	// The invalidate of llr_bits_out that used to sit here has been removed too. The hard-decision
+	// dispatch wrote that buffer (this task's V_K socket) and the downstream native tasks (the
+	// monitor's check_errors, the sink's send_count) read it from the CPU; dispatch_chain_and_wait()
+	// already fence-waited, so the write itself has landed. The invalidate only mattered on
+	// hardware where the allocation is cached but not coherent, where the CPU's view can be stale.
 
 	return num_iter - 1;
 }
