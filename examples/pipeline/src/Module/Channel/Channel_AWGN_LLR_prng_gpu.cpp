@@ -53,6 +53,42 @@ Channel_AWGN_LLR_prng_gpu<R>
 		return spu::runtime::status_t::SUCCESS;
 	}, spu::device_interface::compute_api::CUDA);
 #endif
+#ifdef DECODER_HIP
+	size_t p1_hip_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::HIP, this->dev_id, this->platform_id);
+	this->hip_handler = new sp_hip::Hip_channel_prng(this->dev_id);
+	this->hip_handler->set_seed(this->seed);
+
+	this->register_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N, p1_hip_stream](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int
+	{
+		auto &chn = static_cast<Channel_AWGN_LLR_prng_gpu<R>&>(m);
+
+		chn.hip_handler->add_noise(static_cast<const float*>(t[p1s_X_N ].get_dataptr()),
+		                            static_cast<float*>(t[p1s_Y_N].get_dataptr()),
+		                            chn.total_size,
+		                            *static_cast<const float*>(t[p1s_CP].get_dataptr()),
+		                             t.get_gpu_stream(p1_hip_stream));
+
+		return spu::runtime::status_t::SUCCESS;
+	}, spu::device_interface::compute_api::HIP);
+#endif
+#ifdef DECODER_SYCL
+	size_t p1_sycl_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::SYCL, this->dev_id, this->platform_id);
+	this->sycl_handler = new sp_sycl::Sycl_channel_prng(this->dev_id, this->platform_id);
+	this->sycl_handler->set_seed(this->seed);
+
+	this->register_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N, p1_sycl_stream](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int
+	{
+		auto &chn = static_cast<Channel_AWGN_LLR_prng_gpu<R>&>(m);
+
+		chn.sycl_handler->add_noise(static_cast<const float*>(t[p1s_X_N ].get_dataptr()),
+		                            static_cast<float*>(t[p1s_Y_N].get_dataptr()),
+		                            chn.total_size,
+		                            *static_cast<const float*>(t[p1s_CP].get_dataptr()),
+		                             t.get_gpu_stream(p1_sycl_stream));
+
+		return spu::runtime::status_t::SUCCESS;
+	}, spu::device_interface::compute_api::SYCL);
+#endif
 #ifdef DECODER_VULKAN
 	size_t p1_vulkan_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::VULKAN, this->dev_id, this->platform_id);
 	this->vulkan_handler = new sp_vulkan::Vulkan_channel_prng(this->dev_id);
@@ -94,10 +130,16 @@ void Channel_AWGN_LLR_prng_gpu<R>
 ::set_seed(const int seed)
 {
 	this->seed = seed;
-	// Both handlers are re-keyed: which one actually runs is decided independently, by the
-	// execution device info set on the task.
+	// Every compiled handler is re-keyed: which one actually runs is decided independently, by
+	// the execution device info set on the task.
 #ifdef DECODER_CUDA
 	this->cuda_handler->set_seed((unsigned long long)seed);
+#endif
+#ifdef DECODER_HIP
+	this->hip_handler->set_seed((unsigned long long)seed);
+#endif
+#ifdef DECODER_SYCL
+	this->sycl_handler->set_seed((unsigned long long)seed);
 #endif
 #ifdef DECODER_VULKAN
 	this->vulkan_handler->set_seed((unsigned long long)seed);

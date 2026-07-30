@@ -45,8 +45,9 @@
 #include <cmath>
 #include <cstdint>
 
-// CUDA and HIP need the callee marked as device code; SYCL and plain C++ do not.
-#if defined(__CUDACC__) || defined(__HIPCC__)
+// CUDA and HIP need the callee marked as device code; SYCL and plain C++ do not (a SYCL kernel
+// lambda can call any ordinary inline function visible in the same translation unit).
+#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
 #define PHILOX_FN __host__ __device__ inline
 #else
 #define PHILOX_FN inline

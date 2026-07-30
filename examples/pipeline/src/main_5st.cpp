@@ -89,7 +89,7 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
 // those two differ only by the compute_api set on the task. All flavours share their socket names,
 // and all the GPU ones share their task name, but the CPU one does not, so the choice has to be
 // carried around at bind time.
-enum class channel_impl { CPU, CUDA, CUDA_PRNG, VULKAN_PRNG };
+enum class channel_impl { CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG };
 
 static const char* channel_task_name(const channel_impl impl)
 {
@@ -100,8 +100,13 @@ static const char* channel_task_name(const channel_impl impl)
 // the cuRAND module registers a CUDA codelet and nothing else.
 static spu::device_interface::compute_api channel_compute_api(const channel_impl impl)
 {
-    return impl == channel_impl::VULKAN_PRNG ? spu::device_interface::compute_api::VULKAN
-                                             : spu::device_interface::compute_api::CUDA;
+    switch (impl)
+    {
+        case channel_impl::HIP_PRNG:    return spu::device_interface::compute_api::HIP;
+        case channel_impl::SYCL_PRNG:   return spu::device_interface::compute_api::SYCL;
+        case channel_impl::VULKAN_PRNG: return spu::device_interface::compute_api::VULKAN;
+        default:                        return spu::device_interface::compute_api::CUDA;
+    }
 }
 
 // Only backends actually compiled in are accepted, mirroring str_to_compute_api(): asking for one
@@ -113,13 +118,19 @@ static channel_impl str_to_channel_impl(const std::string& s, const char* opt)
     if (s == "CUDA")           return channel_impl::CUDA;
     if (s == "CUDA_PRNG")      return channel_impl::CUDA_PRNG;
 #endif
+#ifdef DECODER_HIP
+    if (s == "HIP_PRNG")       return channel_impl::HIP_PRNG;
+#endif
+#ifdef DECODER_SYCL
+    if (s == "SYCL_PRNG")      return channel_impl::SYCL_PRNG;
+#endif
 #ifdef DECODER_VULKAN
     if (s == "VULKAN_PRNG")    return channel_impl::VULKAN_PRNG;
 #endif
 
     std::cerr << "(EE) unsupported '" << opt << "' value '" << s
-              << "' (expected CPU, or one of CUDA/CUDA_PRNG/VULKAN_PRNG among the compiled "
-              << "backends: " << compiled_decoder_apis() << ")" << std::endl;
+              << "' (expected CPU, CUDA, or <API>_PRNG among the compiled backends: "
+              << compiled_decoder_apis() << ")" << std::endl;
     std::exit(1);
 }
 
@@ -154,9 +165,9 @@ static void print_gpu_options_help()
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
     std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
               << std::endl;
-    std::cout << "                    {CPU, CUDA, CUDA_PRNG, VULKAN_PRNG}"                       << std::endl;
-    std::cout << "                    CUDA uses cuRAND; CUDA_PRNG and VULKAN_PRNG run the same"  << std::endl;
-    std::cout << "                    hand-written Philox4x32-10 generator on either backend"    << std::endl;
+    std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
+    std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
+    std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
     std::cout << "  --snr-min  <flt>  First Eb/N0 (dB) of the sweep                          [1.00]"
               << std::endl;
     std::cout << "  --snr-max  <flt>  Sweep runs while Eb/N0 < this value (dB)               [4.01]"
@@ -453,7 +464,7 @@ void init_modules(const params &p, modules &m)
 		m.channel_gpu = std::unique_ptr<module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel     = m.channel_gpu.get();
 	}
-	else if (p.chn_api == channel_impl::CUDA_PRNG || p.chn_api == channel_impl::VULKAN_PRNG)
+	else if (p.chn_api != channel_impl::CPU) // any of the *_PRNG flavours: one module, one codelet each
 	{
 		m.channel_gpu_prng = std::unique_ptr<module::Channel_AWGN_LLR_prng_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_prng_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel          = m.channel_gpu_prng.get();
@@ -503,7 +514,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.channel)(m.channel_task)) //                                          first task of the stage
             .add_last_task((*m.channel)(m.channel_task))  //                                      last  task of the stage
-            .set_n_threads(1)) //          can run on a multiple threads (with replication)
+            .set_n_threads(2)) //          can run on a multiple threads (with replication)
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size
@@ -521,7 +532,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(1)) //          can run on a multiple threads (with replication)
+           .set_n_threads(2)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
        	    .set_buffer_size(3) //                                                          synchronization buffer size

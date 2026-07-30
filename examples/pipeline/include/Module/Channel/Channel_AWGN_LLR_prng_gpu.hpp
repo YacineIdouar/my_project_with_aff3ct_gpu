@@ -10,6 +10,12 @@
 #ifdef DECODER_CUDA
 #include "Cuda/Channel_AWGN_LLR_prng_cuda.hpp"
 #endif
+#ifdef DECODER_HIP
+#include "Hip/Channel_AWGN_LLR_prng_hip.hpp"
+#endif
+#ifdef DECODER_SYCL
+#include "Sycl/Channel_AWGN_LLR_prng_sycl.hpp"
+#endif
 #ifdef DECODER_VULKAN
 #include "Vulkan/Channel_AWGN_LLR_prng_vulkan.hpp"
 #endif
@@ -35,11 +41,11 @@ namespace module
  * at bind time; the difference is that the Gaussian samples come from the hand-written
  * Philox4x32-10 generator of include/Rng/Philox4x32.hpp rather than from cuRAND.
  *
- * Like Decoder_LDPC_BP_flooding_gpu, this module registers one codelet per compiled backend
- * on its single task -- CUDA (src/cuda/Channel_AWGN_LLR_prng_cuda.cu) and Vulkan
- * (src/vulkan/Channel_AWGN_LLR_prng_vulkan.cpp) -- and the caller picks between them with
- * set_execution_device_info(), i.e. with --chn-api. Both dispatch the same generator with the
- * same geometry, so they produce bit-identical noise.
+ * Like Decoder_LDPC_BP_flooding_gpu, this module registers one codelet per compiled backend on
+ * its single task -- CUDA, HIP, SYCL and Vulkan (src/{cuda,hip,sycl,vulkan}/Channel_AWGN_LLR_
+ * prng_*) -- and the caller picks between them with set_execution_device_info(), i.e. with
+ * --chn-api. All four dispatch the same generator with the same geometry, so they produce
+ * bit-identical noise.
  *
  * Because that generator is counter-based, this module owns no device-side RNG state: there
  * is no init_rand_state() step, set_seed() is a plain re-key, and set_n_frames() only has to
@@ -61,6 +67,12 @@ protected:
 	std::vector<R> noised_data;  // vector of the noise applied to the signal
 #ifdef DECODER_CUDA
 	Cuda_channel_prng* cuda_handler;
+#endif
+#ifdef DECODER_HIP
+	sp_hip::Hip_channel_prng* hip_handler;
+#endif
+#ifdef DECODER_SYCL
+	sp_sycl::Sycl_channel_prng* sycl_handler;
 #endif
 #ifdef DECODER_VULKAN
 	sp_vulkan::Vulkan_channel_prng* vulkan_handler;
