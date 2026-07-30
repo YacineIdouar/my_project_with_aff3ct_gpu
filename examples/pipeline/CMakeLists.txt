@@ -9,6 +9,30 @@ option(DECODER_VULKAN "Enabling Vulkan of LDPC decoder" OFF)
 set(PROJECT_LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------
+# -fsycl must not be a global flag.
+#
+# It turns on a second, SPIR-V device compilation pass over *every* translation unit it is
+# applied to. Any TU that includes aff3ct.hpp transitively pulls in MIPP, and on aarch64 MIPP
+# includes <arm_neon.h>: the device target (spir64) has no Neon vector types, so clang aborts
+# while mangling them —
+#     unexpected Neon vector element type
+#     UNREACHABLE executed at .../clang/lib/AST/ItaniumMangle.cpp
+# which is what a Jetson Orin AGX build hits on obj-module.
+#
+# Nothing outside obj-sycl needs the flag at compile time: StreamPU's SYCL headers are all
+# guarded by SYCL_LANGUAGE_VERSION, and the SYCL handlers in include/Sycl only forward-declare
+# spu::executor::SYCL_executor. obj-sycl gets -fsycl from its own target_compile_options below,
+# and the executables get it at link time from their target_link_options, so stripping it here
+# loses nothing.
+# ---------------------------------------------------------------------------
+if(CMAKE_CXX_FLAGS MATCHES "-fsycl")
+    string(REGEX REPLACE "-fsycl(-targets=[^ ]*)?" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    string(STRIP "${CMAKE_CXX_FLAGS}" CMAKE_CXX_FLAGS)
+    message(STATUS "pipeline - stripped '-fsycl' from CMAKE_CXX_FLAGS; it is applied per-target "
+                   "instead (obj-sycl at compile time, the executables at link time)")
+endif()
+
+# ---------------------------------------------------------------------------
 # CUDA object library — compiled separately so NVCC flags are isolated
 # ---------------------------------------------------------------------------
 
@@ -78,10 +102,16 @@ if(DECODER_SYCL)
         if(SYCL_BACKEND STREQUAL "")
             message(FATAL_ERROR "SYCL_BACKEND is needed for the oneAPI SYCL_COMPILER (e.g. -DSYCL_BACKEND=nvptx64-nvidia-cuda)")
         endif()
-        target_compile_options(obj-sycl PUBLIC -fsycl -fsycl-targets=${SYCL_BACKEND})
+        # PRIVATE, not PUBLIC: the compile flag must stay on obj-sycl's own sources. PUBLIC would
+        # propagate the SPIR-V device pass to every target linking obj-sycl (the executables),
+        # whose main*.cpp include aff3ct.hpp -> MIPP -> <arm_neon.h> and would then hit the same
+        # aarch64 mangling crash described at the top of this file. The link options stay PUBLIC:
+        # linking is where -fsycl is genuinely needed downstream.
+        target_compile_options(obj-sycl PRIVATE -fsycl -fsycl-targets=${SYCL_BACKEND})
         target_link_options(obj-sycl PUBLIC -fsycl -fsycl-targets=${SYCL_BACKEND})
     elseif(SYCL_COMPILER STREQUAL "acpp")
-        target_compile_options(obj-sycl PUBLIC --acpp-targets=generic)
+        # PRIVATE for the same reason as the oneAPI branch above.
+        target_compile_options(obj-sycl PRIVATE --acpp-targets=generic)
         target_link_options(obj-sycl PUBLIC --acpp-targets=generic)
     else()
         message(FATAL_ERROR "Unknown SYCL_COMPILER '${SYCL_COMPILER}': expected 'oneapi' or 'acpp'")
