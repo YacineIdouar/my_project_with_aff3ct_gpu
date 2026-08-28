@@ -28,7 +28,7 @@ namespace sp_hip
 		spu::executor::HIP_executor* executor;
 		// Per-decoder profiling totals, registered process-wide; see
 		// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
-		gpu_prof::accumulator prof{ "HIP" };
+		gpu_prof::accumulator prof{ "DECODER", "HIP" };
 		ThreadContext* context;
 	public:
 		Hip_decoder(int device_id);

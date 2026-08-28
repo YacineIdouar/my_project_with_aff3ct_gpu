@@ -115,6 +115,34 @@ Channel_AWGN_LLR_prng_gpu<R>* Channel_AWGN_LLR_prng_gpu<R>
 {
 	auto m = new Channel_AWGN_LLR_prng_gpu(*this);
 	m->deep_copy(*this);
+
+	// A replica gets its *own* handlers, exactly as Decoder_LDPC_BP_flooding_gpu::clone() does.
+	// The copy constructor above only copied the pointers, which left every replicated thread of
+	// the channel stage sharing one handler -- and with it one executor and one call counter, both
+	// written concurrently.
+	//
+	// Re-keying with this->seed here is only a placeholder: main() walks every module of the built
+	// pipeline, replicas included, and hands each a distinct seed drawn from its own PRNG (the
+	// Interface_set_seed loop), which is what keeps the replicas' noise streams independent. Until
+	// that runs the replicas would all draw the same sub-streams, so nothing may decode between
+	// clone() and the seeding loop.
+#ifdef DECODER_CUDA
+	m->cuda_handler = new Cuda_channel_prng(m->dev_id);
+	m->cuda_handler->set_seed(m->seed);
+#endif
+#ifdef DECODER_HIP
+	m->hip_handler = new sp_hip::Hip_channel_prng(m->dev_id);
+	m->hip_handler->set_seed(m->seed);
+#endif
+#ifdef DECODER_SYCL
+	m->sycl_handler = new sp_sycl::Sycl_channel_prng(m->dev_id, m->platform_id);
+	m->sycl_handler->set_seed(m->seed);
+#endif
+#ifdef DECODER_VULKAN
+	m->vulkan_handler = new sp_vulkan::Vulkan_channel_prng(m->dev_id);
+	m->vulkan_handler->set_seed(m->seed);
+#endif
+
 	return m;
 }
 

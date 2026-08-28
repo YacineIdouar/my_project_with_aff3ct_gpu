@@ -28,7 +28,7 @@ namespace sp_cuda
 		spu::executor::CUDA_executor* executor;
 		// Per-decoder profiling totals, registered process-wide; see
 		// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
-		gpu_prof::accumulator prof{ "CUDA" };
+		gpu_prof::accumulator prof{ "DECODER", "CUDA" };
 		ThreadContext* context;
 	public:
 		Cuda_decoder(int device_id);

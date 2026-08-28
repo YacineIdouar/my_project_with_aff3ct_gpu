@@ -42,7 +42,7 @@ namespace sp_vulkan
 
 		// Registered process-wide by its constructor, so the report main_gpu.cpp prints covers every
 		// decoder without being handed one. Written only by the thread that owns this decoder.
-		gpu_prof::accumulator prof{ "VULKAN" };
+		gpu_prof::accumulator prof{ "DECODER", "VULKAN" };
 
 		// Only the two implementations derive from this; everyone else goes through create().
 		explicit Vulkan_decoder(int device_id) : dev_id(device_id), context(nullptr) {}

@@ -14,6 +14,7 @@ subtlety: see the header comment of Decoder_LDPC_sycl_kernel.cpp for that case.)
 */
 
 #include <sycl/sycl.hpp>
+#include <chrono>
 #include <cstdint>
 
 #include "Sycl/Channel_AWGN_LLR_prng_sycl.hpp"
@@ -90,6 +91,13 @@ sp_sycl::Sycl_channel_prng::add_noise(const float* d_x,
 	sycl::nd_range<1> ndr{ sycl::range<1>{ (size_t)global_size },
 	                       sycl::range<1>{ (size_t)THREADS_PER_GROUP } };
 
+	// --dec-profile / SPU_LDPC_PROFILE. Host side only: the queue the task hands us was not created
+	// with sycl::property::queue::enable_profiling, so it cannot report a kernel time, and running
+	// on SYCL_executor's separate profiling queue instead would measure a different execution than
+	// the one under test. The accumulator is built with gpu_timed=false and the report prints 'n/a'.
+	const bool profiled = gpu_prof::enabled();
+	const auto enqueue_start = std::chrono::steady_clock::now();
+
 	native_stream.submit([&](sycl::handler& h)
 	{
 		h.parallel_for(ndr, [=](sycl::nd_item<1> item)
@@ -110,5 +118,12 @@ sp_sycl::Sycl_channel_prng::add_noise(const float* d_x,
 		});
 	});
 
+	// Closed before the wait, so it measures the submission and not how long the device took -- the
+	// same window the CUDA/HIP/Vulkan CPU column reports.
+	const auto enqueue_end = std::chrono::steady_clock::now();
+
 	native_stream.wait();
+
+	if (profiled)
+		this->prof.add(std::chrono::duration<float, std::micro>(enqueue_end - enqueue_start).count(), 0.f);
 }

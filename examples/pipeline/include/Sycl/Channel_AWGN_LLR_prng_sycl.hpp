@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 
 namespace spu { namespace executor { class SYCL_executor; } }
 
@@ -28,6 +29,9 @@ private:
 	int dev_id;
 	int platform_id;
 	spu::executor::SYCL_executor* executor;
+	// Per-handler profiling totals, registered process-wide; see
+	// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+	gpu_prof::accumulator prof{ "CHANNEL", "SYCL", /*gpu_timed=*/false };
 
 	uint32_t seed_lo, seed_hi; // 64-bit seed split into the two Philox key words
 

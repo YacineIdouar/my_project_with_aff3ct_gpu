@@ -9,6 +9,7 @@
 // self-contained instead of relying on whatever the including translation unit happened to pull
 // in before it. Remove once the dependency is fixed upstream.
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 
 namespace spu { namespace executor { class HIP_executor; } }
 
@@ -31,6 +32,10 @@ class Hip_channel_prng
 private:
 	int dev_id;
 	spu::executor::HIP_executor* executor;
+	// Per-handler profiling totals, registered process-wide; see
+	// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+	gpu_prof::accumulator prof{ "CHANNEL", "HIP" };
+
 
 	uint32_t seed_lo, seed_hi; // 64-bit seed split into the two Philox key words
 

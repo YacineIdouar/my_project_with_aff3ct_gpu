@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 
 #ifdef __CUDACC__
 #include <cuda_runtime.h>
@@ -25,6 +26,10 @@ class Cuda_channel_prng
 private:
 	int dev_id;
 	spu::executor::CUDA_executor* executor;
+	// Per-handler profiling totals, registered process-wide; see
+	// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+	gpu_prof::accumulator prof{ "CHANNEL", "CUDA" };
+
 
 	unsigned int seed_lo, seed_hi; // 64-bit seed split into the two Philox key words
 

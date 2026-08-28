@@ -62,6 +62,18 @@ Channel_AWGN_LLR_gpu<R>* Channel_AWGN_LLR_gpu<R>
 {
 	auto m = new Channel_AWGN_LLR_gpu(*this);
 	m->deep_copy(*this);
+
+	// A replica gets its own handler, as Decoder_LDPC_BP_flooding_gpu::clone() does: the copy
+	// constructor above only copied the pointer, leaving every replicated thread of the channel
+	// stage sharing one handler, one executor and -- here -- one buffer of cuRAND states, which
+	// several threads would then draw from at once.
+	//
+	// Unlike the Philox handler this one really does hold device state, so the replica allocates
+	// and initialises its own. main()'s Interface_set_seed loop re-seeds every replica afterwards
+	// (set_seed() re-runs init_rand_state()), which is what makes their streams independent.
+	m->cuda_handler = new Cuda_channel(m->dev_id);
+	m->cuda_handler->init_rand_state(m->total_size, m->seed);
+
 	return m;
 }
 

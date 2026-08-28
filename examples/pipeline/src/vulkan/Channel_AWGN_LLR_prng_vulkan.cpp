@@ -125,6 +125,12 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
+	// --dec-profile / SPU_LDPC_PROFILE. Forcing the executor's own flag to match ours keeps the two
+	// from disagreeing: return_profiling_times() throws when nothing was recorded. No lock needed
+	// around the executor here -- unlike the CUDA/HIP channels, this one is built per call.
+	const bool profiled = gpu_prof::enabled();
+	exec.set_profiling(profiled);
+
 	// The flush of d_x and the invalidate of d_y that used to bracket this dispatch have been
 	// removed. They only did anything when allocate_memory() fell back to a cached, non-coherent
 	// memory type (see VULKAN_device::allocate_memory / flush_memory / invalidate_memory -- both
@@ -133,6 +139,9 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
 		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
-		exec.dispatch_chain_and_wait(chain);
+		exec.dispatch_chain_and_wait(chain, profiled);
 	}
+
+	// One record for the one dispatch: (host-side launch, GPU time of the shader).
+	if (profiled) this->prof.add(exec.return_profiling_times());
 }

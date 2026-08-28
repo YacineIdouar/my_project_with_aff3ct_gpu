@@ -30,7 +30,7 @@ namespace sp_sycl
 		spu::executor::SYCL_executor* executor;
 		// Per-decoder profiling totals, registered process-wide; see
 		// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
-		gpu_prof::accumulator prof{ "SYCL", /*gpu_timed=*/false };
+		gpu_prof::accumulator prof{ "DECODER", "SYCL", /*gpu_timed=*/false };
 		ThreadContext* context;
 	public:
 		Sycl_decoder(int device_id, int platform_id = 0);

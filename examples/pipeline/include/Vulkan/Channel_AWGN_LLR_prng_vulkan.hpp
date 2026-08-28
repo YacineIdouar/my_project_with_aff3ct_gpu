@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 
 namespace sp_vulkan
 {
@@ -23,6 +24,9 @@ class Vulkan_channel_prng
 {
 private:
 	int dev_id;
+	// Per-handler profiling totals, registered process-wide; see
+	// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+	gpu_prof::accumulator prof{ "CHANNEL", "VULKAN" };
 
 	uint32_t seed_lo, seed_hi; // 64-bit seed split into the two Philox key words
 
