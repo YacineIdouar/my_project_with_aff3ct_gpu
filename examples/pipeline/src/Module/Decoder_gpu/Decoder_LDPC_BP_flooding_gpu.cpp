@@ -97,7 +97,7 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::Decoder_LDPC_BP_flooding_gpu(
 #ifdef DECODER_VULKAN
 	// Enable GPU
 	size_t p1_stream_vulkan = this->create_gpu_stream(p1, spu::device_interface::compute_api::VULKAN, this->dev_id, this->platform_id);
-	this->vulkan_handler = new sp_vulkan::Vulkan_decoder(this->dev_id);
+	this->vulkan_handler = sp_vulkan::Vulkan_decoder::create(this->dev_id);
 	this->vulkan_handler->ldpc_decoder_init(this->K, this->N_cw);
 
     this->register_codelet(
@@ -140,7 +140,7 @@ Decoder_LDPC_BP_flooding_gpu<B, R>::clone() const
 	m->sycl_handler->ldpc_decoder_init(this->K, this->N_cw);
 #endif
 #ifdef DECODER_VULKAN
-	m->vulkan_handler = new sp_vulkan::Vulkan_decoder(m->dev_id);
+	m->vulkan_handler = sp_vulkan::Vulkan_decoder::create(m->dev_id);
 	m->vulkan_handler->ldpc_decoder_init(this->K, this->N_cw);
 #endif
 	return m;

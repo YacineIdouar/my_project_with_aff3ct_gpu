@@ -8,6 +8,18 @@ option(DECODER_VULKAN "Enabling Vulkan of LDPC decoder" OFF)
 
 set(PROJECT_LANGUAGES CXX)
 
+# Jetson / Tegra (integrated GPU): socket memory must be HOST, not MANAGED.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    set(TEGRA_MODEL "")
+    if(EXISTS "/proc/device-tree/model")
+        file(READ "/proc/device-tree/model" TEGRA_MODEL LIMIT 256)
+    endif()
+    if(EXISTS "/etc/nv_tegra_release" OR TEGRA_MODEL MATCHES "Orin|Xavier|Tegra|Jetson")
+        message(WARNING "pipeline - integrated Tegra GPU: fix the socket memory type to HOST "
+                        "(StreamPU's SYCL backend uses MANAGED and will crash).")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # -fsycl must not be a global flag.
 #

@@ -13,6 +13,7 @@
 
 #include <aff3ct.hpp>
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_prng_gpu.hpp"
 using namespace aff3ct;
@@ -153,6 +154,18 @@ static bool extract_option(std::vector<char*>& args, const char* opt, std::strin
     return false;
 }
 
+// Same idea for a valueless switch: present or absent, one token to erase.
+static bool extract_flag(std::vector<char*>& args, const char* opt)
+{
+    for (size_t i = 1; i < args.size(); i++)
+        if (std::strcmp(args[i], opt) == 0)
+        {
+            args.erase(args.begin() + i);
+            return true;
+        }
+    return false;
+}
+
 // These are consumed before the factory parser runs, so they never appear in its own help output.
 static void print_gpu_options_help()
 {
@@ -168,6 +181,26 @@ static void print_gpu_options_help()
     std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
     std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
     std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
+    std::cout << "  --dec-stage-copy  Run the decoder stage's adaptors in copy mode instead   [off]"
+              << std::endl;
+    std::cout << "                    of no-copy, so its Y_N/V_K socket buffers stop rotating"      << std::endl;
+    std::cout << "                    from one frame to the next (see init_utils())"                << std::endl;
+#ifdef DECODER_VULKAN
+    std::cout << "  --dec-vk-chain <impl>  Vulkan decoder implementation, 'cached' or       ["
+              << sp_vulkan::Vulkan_decoder::impl_to_str(sp_vulkan::Vulkan_decoder::get_default_impl())
+              << "]" << std::endl;
+    std::cout << "                    'rebuilt'. 'cached' describes the dispatch chain once and"    << std::endl;
+    std::cout << "                    reuses it (hits StreamPU's recorded-dispatch cache);"         << std::endl;
+    std::cout << "                    'rebuilt' rebuilds it on every decode. Same output, they"     << std::endl;
+    std::cout << "                    differ in host-side launch cost only. Also settable with"     << std::endl;
+    std::cout << "                    the SPU_LDPC_VULKAN_CHAIN environment variable"               << std::endl;
+#endif
+    std::cout << "  --dec-profile     Time each decode's host-side launch cost and, where the  [off]"
+              << std::endl;
+    std::cout << "                    backend can report it, its device time; print a summary"      << std::endl;
+    std::cout << "                    at the end of the run. Works on every decoder backend"        << std::endl;
+    std::cout << "                    (SYCL reports the host side only, see the report's note)."    << std::endl;
+    std::cout << "                    Same as SPU_LDPC_PROFILE=1"                                   << std::endl;
     std::cout << std::endl;
 }
 
@@ -196,6 +229,18 @@ struct params
     size_t n_threads = std::thread::hardware_concurrency();
     float  ebn0      = 2.40f; // SNR value
     float  R;                  // code rate (R=K/N)
+
+    bool dec_stage_copy = false; // --dec-stage-copy: copy adaptors around the decoder stage
+
+#ifdef DECODER_VULKAN
+    // --dec-vk-chain: which of the two Vulkan decoder implementations every decoder is built from.
+    // Only read when the decoder actually runs on Vulkan; both are always compiled.
+    sp_vulkan::decoder_impl dec_vk_chain = sp_vulkan::Vulkan_decoder::get_default_impl();
+#endif
+
+    // --dec-profile: time every decode's launch cost and, where the backend can report it, its
+    // device time; a summary is printed once the pipeline has stopped. Backend independent.
+    bool dec_profile = gpu_prof::enabled();
 
     int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
     int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
@@ -334,6 +379,11 @@ int main(int argc, char** argv)
         std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
         spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
     }
+    // After the stage statistics, and after pipeline->exec() returned: the counters it reads are
+    // written by the decoding threads without synchronisation, so they are only stable once those
+    // threads have joined. Prints nothing when no decode was profiled.
+    gpu_prof::print_report(std::cout);
+
     std::cout << "#" << std::endl << "# End of the simulation" << std::endl;
 
     return 0;
@@ -353,6 +403,32 @@ void init_params(int argc, char** argv, params &p)
     std::string chn_str = "CUDA";
     extract_option(args, "--chn-api", chn_str);
     p.chn_api = str_to_channel_impl(chn_str, "--chn-api");
+
+    p.dec_stage_copy = extract_flag(args, "--dec-stage-copy");
+
+#ifdef DECODER_VULKAN
+    // Applied to the process-wide default right here, before init_modules() builds the first
+    // decoder: replicated stages build theirs during the pipeline build and each keeps whatever
+    // was current then.
+    std::string vk_chain_str = sp_vulkan::Vulkan_decoder::impl_to_str(p.dec_vk_chain);
+    if (extract_option(args, "--dec-vk-chain", vk_chain_str))
+    {
+        if (!sp_vulkan::Vulkan_decoder::str_to_impl(vk_chain_str, p.dec_vk_chain))
+        {
+            std::cerr << "(EE) unsupported '--dec-vk-chain' value '" << vk_chain_str
+                      << "' (expected 'cached' or 'rebuilt')." << std::endl;
+            std::exit(1);
+        }
+        sp_vulkan::Vulkan_decoder::set_default_impl(p.dec_vk_chain);
+    }
+
+#endif
+
+    if (extract_flag(args, "--dec-profile"))
+    {
+        p.dec_profile = true;
+        gpu_prof::set_enabled(true);
+    }
 
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
@@ -386,6 +462,16 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#    ** Decoder API                   = " << api_str
               << " (compiled: " << compiled_decoder_apis() << ")" << std::endl;
     std::cout << "#    ** Channel API                   = " << chn_str << std::endl;
+    std::cout << "#    ** Decoder stage adaptors        = " << (p.dec_stage_copy ? "copy" : "no-copy")
+              << std::endl;
+#ifdef DECODER_VULKAN
+    if (p.dec_api == spu::device_interface::compute_api::VULKAN)
+    {
+        std::cout << "#    ** Vulkan dispatch chain         = "
+                  << sp_vulkan::Vulkan_decoder::impl_to_str(p.dec_vk_chain) << std::endl;
+    }
+#endif
+    std::cout << "#    ** Decode profiling              = " << (p.dec_profile ? "on" : "off") << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
@@ -454,34 +540,25 @@ void init_utils(const params &p, const modules &m, utils &u)
             .set_buffer_size(3) //                                                          synchronization buffer size
             .set_active_waiting(false)) //                                          passive waiting for synchronization
 
-		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
-            .add_first_task((*m.channel)(m.channel_task)) //                                          first task of the stage
-            .add_last_task((*m.channel)(m.channel_task))  //                                      last  task of the stage
-            .set_n_threads(2)) //          can run on a multiple threads (with replication)
-        // ------------------------------------------------------------------------------------------------------------
-        .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
-            .set_buffer_size(3) //                                                          synchronization buffer size
-            .set_active_waiting(false)) //                                          passive waiting for synchronization
-
-		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
-           .add_first_task((*m.modem)("demodulate")) //                                          first task of the stage
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
+           .add_first_task((*m.channel)(m.channel_task)) //                                          first task of the stage
            .add_last_task((*m.puncturer)("depuncture")) //                                      last  task of the stage
            .set_n_threads(1)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
-       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 2 <-> 3
        	    .set_buffer_size(3) //                                                          synchronization buffer size
        	    .set_active_waiting(false)) //                                          passive waiting for synchronization
 
-		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
+		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 3
            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(2)) //          can run on a multiple threads (with replication)
+           .set_n_threads(1)) //          can run on a multiple threads (with replication)
        // // ------------------------------------------------------------------------------------------------------------
-       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
+       	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 3 <-> 4
        	    .set_buffer_size(3) //                                                          synchronization buffer size
        	    .set_active_waiting(false)) //                                          passive waiting for synchronization
         // ------------------------------------------------------------------------------------------------------------
-        .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
+        .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 4
             .set_first_tasks({&(*m.monitor)("check_errors"), //                            two first tasks of the stage
                               &(*m.sink)("send_count")}) //                  (and NO need for a last task in this case)
             .set_n_threads(1)) //                                               run on a single thread (NO replication)
@@ -490,6 +567,39 @@ void init_utils(const params &p, const modules &m, utils &u)
 
 	// Setting the number of frames 
 	//u.pipeline->set_n_frames(2);
+
+	// --dec-stage-copy: take the decoder stage out of no-copy mode.
+	//
+	// In no-copy mode an Adaptor_m_to_n hands the stage a buffer out of its pool and takes it back
+	// on push, so the decode task sees a *different* Y_N (and V_K) allocation almost every frame.
+	// That is free on the CPU side, but it is death for anything keyed on the buffer identity: the
+	// Vulkan backend's recorded command buffers bake the descriptor sets -- hence the buffers --
+	// into the recording, so a rotating socket is a cache miss per frame in
+	// VulkanStream::find_recorded_dispatch(), and once its 8 entries are full every frame pays a
+	// full re-record. In copy mode the adaptor memcpy's in and out of the stage's own sockets
+	// instead, which keeps a single pair of allocations alive for the whole run and turns those
+	// misses into hits.
+	//
+	// Worth measuring both ways: the copy is two memcpy per frame (N_cw floats in, K ints out)
+	// against a full descriptor-set + command-buffer rebuild per frame.
+	if (p.dec_stage_copy)
+	{
+		bool found = false;
+		for (auto* stage : u.pipeline->get_stages())
+		{
+			for (auto& type : stage->get_tasks_per_types())
+				for (auto& tsk : type)
+					if (tsk->get_name().find("decode_siho_gpu") != std::string::npos) found = true;
+
+			if (found)
+			{
+				stage->set_no_copy_mode(false);
+				break;
+			}
+		}
+		if (!found)
+			std::cerr << "(WW) '--dec-stage-copy': no pipeline stage holds 'decode_siho_gpu'." << std::endl;
+	}
 
     std::ofstream f("pipeline.dot");
     u.pipeline->export_dot(f);

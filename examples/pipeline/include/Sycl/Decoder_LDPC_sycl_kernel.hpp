@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg1.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg2.hpp"
 
@@ -27,6 +28,9 @@ namespace sp_sycl
 		int dev_id;
 		int platform_id;
 		spu::executor::SYCL_executor* executor;
+		// Per-decoder profiling totals, registered process-wide; see
+		// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+		gpu_prof::accumulator prof{ "SYCL", /*gpu_timed=*/false };
 		ThreadContext* context;
 	public:
 		Sycl_decoder(int device_id, int platform_id = 0);

@@ -336,19 +336,43 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 
 	dim3 t(256);
     dim3 b(blocks_for(num_vns, t.x));
-	executor->launch(clip_channel_kernel, b, t, 0, native_stream, llr_in, this->context->llr_total_buffer, num_vns);
+
+	// --dec-profile / SPU_LDPC_PROFILE. launch_with_profiling() records a pair of events around the
+	// kernel *on the same stream*, so profiling changes what is measured, not where the work runs.
+	// One helper instead of an if at each of the four call sites; the argument packs are long
+	// enough already.
+	const bool profiled = gpu_prof::enabled();
+	auto dispatch = [&](auto kernel, auto grid, auto block, auto&&... args)
+	{
+		if (profiled)
+			executor->launch_with_profiling(
+			  kernel, grid, block, 0, native_stream, std::forward<decltype(args)>(args)...);
+		else
+			executor->launch(kernel, grid, block, 0, native_stream, std::forward<decltype(args)>(args)...);
+	};
+
+	dispatch(clip_channel_kernel, b, t, llr_in, this->context->llr_total_buffer, num_vns);
 
 	float const* llr_total = llr_in;
 
 	for (uint32_t iter = 0; iter < num_iter; ++iter)
 	{
-		executor->launch(update_cn_kernel, blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0, native_stream, llr_total, this->context->llr_msg_buffer, Zc, g_bg.cn, g_bg.cn_degree, g_bg.cn_stride, g_bg.num_rows, iter == 0);
-		executor->launch(update_vn_kernel, blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0, native_stream, this->context->llr_msg_buffer, llr_in, this->context->llr_total_buffer, Zc, g_bg.vn, g_bg.vn_degree, g_bg.vn_stride, g_bg.num_cols, g_bg.num_rows);
+		dispatch(update_cn_kernel, blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, llr_total, this->context->llr_msg_buffer, Zc, g_bg.cn, g_bg.cn_degree, g_bg.cn_stride, g_bg.num_rows, iter == 0);
+		dispatch(update_vn_kernel, blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, this->context->llr_msg_buffer, llr_in, this->context->llr_total_buffer, Zc, g_bg.vn, g_bg.vn_degree, g_bg.vn_stride, g_bg.num_cols, g_bg.num_rows);
 		llr_total = this->context->llr_total_buffer;
 	}
-	executor->launch(hard_decision_kernel, blocks_for(K, 256), 256, 0, native_stream, llr_total, llr_bits_out, K);
+	dispatch(hard_decision_kernel, blocks_for(K, 256), 256, llr_total, llr_bits_out, K);
 
 	executor->synchronize(native_stream);
+
+	// After the sync: the events the launches recorded only hold a time once the work completed.
+	// clear_profiling_records() is mandatory here -- the records (and their events) would otherwise
+	// pile up for the lifetime of the executor and every decode would replay the whole history.
+	if (profiled)
+	{
+		this->prof.add(executor->return_profiling_times());
+		executor->clear_profiling_records();
+	}
 
 	return num_iter - 1;
 }

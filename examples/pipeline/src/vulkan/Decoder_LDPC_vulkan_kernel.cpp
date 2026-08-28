@@ -16,6 +16,12 @@ dispatch_chain_and_wait() call (one submit + one fence wait for the whole decode
 instead of one round trip per kernel launch).
 */
 
+// One of the two interchangeable implementations of sp_vulkan::Vulkan_decoder; the other is in
+// Decoder_LDPC_vulkan_kernel_cached.cpp. Both are always compiled and the choice is made at
+// runtime -- see Vulkan_decoder::create() in Decoder_LDPC_vulkan_decoder.cpp, and --dec-vk-chain
+// in main_gpu.cpp.
+#ifdef DECODER_VULKAN
+
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -104,6 +110,34 @@ const std::vector<uint32_t>& get_hard_decision_spirv_words()
 }
 
 // ---------------------------------------------------------------------------
+// The implementation itself. Anonymous namespace: nothing outside this file names the type, it is
+// reached only through the Vulkan_decoder interface and the factory function at the bottom.
+// ---------------------------------------------------------------------------
+namespace
+{
+class Vulkan_decoder_rebuilt : public sp_vulkan::Vulkan_decoder
+{
+  public:
+    explicit Vulkan_decoder_rebuilt(int device_id)
+      : sp_vulkan::Vulkan_decoder(device_id)
+    {
+    }
+
+    void ldpc_decoder_init(int K, int N) override;
+    void ldpc_decoder_init_context() override;
+
+    uint32_t ldpc_decode(float const* llr_in,
+                         uint32_t K,
+                         uint32_t num_iter,
+                         uint32_t perform_syndrome_check,
+                         int* llr_bits_out,
+                         spu::device_interface::GpuStream* stream) override;
+
+    void ldpc_decoder_shutdown(void) override;
+};
+}
+
+// ---------------------------------------------------------------------------
 // Upload one table variant's four arrays into GPU memory and populate the
 // corresponding pointer + stride fields of the provided base graph struct.
 // Called once from ldpc_decoder_init().
@@ -154,17 +188,11 @@ static void upload_tables(Std_5G_base_graph* bg, int dev_id)
 	bg->vn_stride = sz_vn[b][ils] / (sizeof(bg->vn[0]) * bg->num_cols);
 }
 
-//Init the GPU handler
-sp_vulkan::Vulkan_decoder::Vulkan_decoder(int device_id)
-	: dev_id(device_id), context(nullptr)
-{
-}
-
 // ---------------------------------------------------------------------------
 // ldpc_decoder_init_context — per-thread working buffer allocation.
 // Buffer sizes are derived from the already-resolved g_bg fields.
 // ---------------------------------------------------------------------------
-void sp_vulkan::Vulkan_decoder::ldpc_decoder_init_context()
+void Vulkan_decoder_rebuilt::ldpc_decoder_init_context()
 {
 	this->context = new sp_vulkan::ThreadContext;
 
@@ -191,7 +219,7 @@ void sp_vulkan::Vulkan_decoder::ldpc_decoder_init_context()
 //   3. ldpc_decoder_init_context  — allocates per-thread GPU working buffers
 // ---------------------------------------------------------------------------
 void
-sp_vulkan::Vulkan_decoder::ldpc_decoder_init(int K, int N)
+Vulkan_decoder_rebuilt::ldpc_decoder_init(int K, int N)
 {
 	// Delegate all BG selection and Zc resolution to your helper.
 	// Throws std::invalid_argument on bad (K, N) — let it propagate.
@@ -216,7 +244,7 @@ sp_vulkan::Vulkan_decoder::ldpc_decoder_init(int K, int N)
 //   - block_length kept as K (the caller's original K, not K_LDPC)
 // ---------------------------------------------------------------------------
 uint32_t
-sp_vulkan::Vulkan_decoder::ldpc_decode(
+Vulkan_decoder_rebuilt::ldpc_decode(
 	float const*   llr_in,            // g_bg.num_cols * g_bg.Zc bytes
 	uint32_t       K,                  // info bits to unpack (≤ g_bg.K_LDPC)
 	uint32_t       num_iter,
@@ -283,6 +311,13 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
+	// Profiling is a per-run choice (--dec-vk-profile / SPU_VULKAN_PROFILE), so force the
+	// executor's own flag to match ours instead of letting the two disagree: return_profiling_times()
+	// throws when nothing was recorded, and would silently collect behind our back if it were on
+	// here and off there.
+	const bool profiled = gpu_prof::enabled();
+	exec.set_profiling(profiled);
+
 	// The flush of llr_in that used to sit here has been removed: llr_in is written by the upstream
 	// native task (the puncturer's depuncture) and read by the first dispatch, so it is only needed
 	// when allocate_memory() fell back to a cached, non-coherent memory type (see
@@ -292,8 +327,13 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
 		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
-		exec.dispatch_chain_and_wait(chain);
+		exec.dispatch_chain_and_wait(chain, profiled);
 	}
+
+	// One record per launch, and the chain is one launch, so this is a single (cpu, gpu) pair in
+	// microseconds. Folded into this decoder's totals; main_gpu.cpp prints them once the pipeline
+	// has stopped.
+	if (profiled) this->prof.add(exec.return_profiling_times());
 
 	// The invalidate of llr_bits_out that used to sit here has been removed too. The hard-decision
 	// dispatch wrote that buffer (this task's V_K socket) and the downstream native tasks (the
@@ -307,4 +347,15 @@ sp_vulkan::Vulkan_decoder::ldpc_decode(
 // ---------------------------------------------------------------------------
 // ldpc_decoder_shutdown
 // ---------------------------------------------------------------------------
-void sp_vulkan::Vulkan_decoder::ldpc_decoder_shutdown() {}
+void Vulkan_decoder_rebuilt::ldpc_decoder_shutdown() {}
+
+// ---------------------------------------------------------------------------
+// Declared in Decoder_LDPC_vulkan_kernel.hpp, called only by Vulkan_decoder::create().
+// ---------------------------------------------------------------------------
+sp_vulkan::Vulkan_decoder*
+sp_vulkan::make_decoder_chain_rebuilt(int device_id)
+{
+	return new Vulkan_decoder_rebuilt(device_id);
+}
+
+#endif // DECODER_VULKAN

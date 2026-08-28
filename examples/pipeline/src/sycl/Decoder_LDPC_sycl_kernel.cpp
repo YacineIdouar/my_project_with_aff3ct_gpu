@@ -361,6 +361,16 @@ sp_sycl::Sycl_decoder::ldpc_decode(
 	const uint32_t num_vns = g_bg.num_cols * Zc;
 	const uint32_t num_cns = g_bg.num_rows * Zc;
 
+	// --dec-profile / SPU_LDPC_PROFILE. Host side only, and deliberately so: a SYCL queue reports
+	// kernel times only if it was built with sycl::property::queue::enable_profiling, and the queue
+	// the task hands us was not (SyclStream's constructor in StreamPU asks for in_order and nothing
+	// else). SYCL_executor's answer is a second, profiling-enabled queue of its own -- but running
+	// the decode there would mean profiling a different execution than the one under test, so the
+	// device column is left empty for this backend instead (the accumulator is built with
+	// gpu_timed=false, and the report prints 'n/a').
+	const bool profiled = gpu_prof::enabled();
+	const auto enqueue_start = std::chrono::steady_clock::now();
+
 	clip_channel_kernel(native_stream, llr_in, this->context->llr_total_buffer, num_vns);
 
 	float const* llr_total = llr_in;
@@ -373,7 +383,18 @@ sp_sycl::Sycl_decoder::ldpc_decode(
 	}
 	hard_decision_kernel(native_stream, llr_total, llr_bits_out, K);
 
+	// Closed before the wait, so it measures the submission of the whole decode and not how long
+	// the device took -- the same window the CUDA/HIP/Vulkan CPU column reports.
+	const auto enqueue_end = std::chrono::steady_clock::now();
+
 	native_stream.wait();
+
+	if (profiled)
+	{
+		const float cpu_us = std::chrono::duration<float, std::micro>(enqueue_end - enqueue_start).count();
+		// One record for the decode, counting the kernels it enqueued: 2 + 2*num_iter.
+		this->prof.add(cpu_us, 0.f, 2 + (uint64_t)2 * num_iter);
+	}
 
 	return num_iter - 1;
 }

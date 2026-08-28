@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <streampu.hpp>
+#include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg1.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg2.hpp"
 
@@ -25,6 +26,9 @@ namespace sp_cuda
 	private:
 		int dev_id;
 		spu::executor::CUDA_executor* executor;
+		// Per-decoder profiling totals, registered process-wide; see
+		// Module/Decoder_gpu/gpu_decoder_profiling.hpp.
+		gpu_prof::accumulator prof{ "CUDA" };
 		ThreadContext* context;
 	public:
 		Cuda_decoder(int device_id);
