@@ -55,6 +55,7 @@ decoder thread and never move again.
 
 #include "Vulkan/Decoder_LDPC_vulkan_kernel.hpp"
 #include "Vulkan/vulkan_submit_lock.hpp"
+#include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
 #include "Device/Devices_manager.hpp"
 #include "Device/Vulkan/Vulkan_device.hpp"
 #include "Device/Vulkan/Vulkan_executor.hpp"
@@ -508,6 +509,13 @@ Vulkan_decoder_cached::ldpc_decode(
 	// the SPIR-V blob, and the recorded command buffer belongs to the stream, not to the executor.
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
+
+	// --gpu-dispatch. CACHED reuses the recorded VkCommandBuffer for this exact chain; ONE_SHOT
+	// re-records it every frame. Set explicitly rather than left to the executor's environment
+	// default, so one switch drives this and the CUDA graph path together.
+	exec.set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
+	                         ? spu::executor::vk_dispatch_mode::CACHED
+	                         : spu::executor::vk_dispatch_mode::ONE_SHOT);
 
 	// Profiling is a per-run choice (--dec-vk-profile / SPU_VULKAN_PROFILE), so force the
 	// executor's own flag to match ours instead of letting the two disagree: return_profiling_times()

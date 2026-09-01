@@ -20,6 +20,7 @@ output even when the allocation landed on non-coherent memory.
 
 #include "Vulkan/Channel_AWGN_LLR_prng_vulkan.hpp"
 #include "Vulkan/vulkan_submit_lock.hpp"
+#include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
 #include "Device/Devices_manager.hpp"
 #include "Device/Vulkan/Vulkan_device.hpp"
 #include "Device/Vulkan/Vulkan_executor.hpp"
@@ -124,6 +125,13 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
+
+	// --gpu-dispatch. CACHED reuses the recorded VkCommandBuffer for this exact chain; ONE_SHOT
+	// re-records it every frame. Set explicitly rather than left to the executor's environment
+	// default, so one switch drives this and the CUDA graph path together.
+	exec.set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
+	                         ? spu::executor::vk_dispatch_mode::CACHED
+	                         : spu::executor::vk_dispatch_mode::ONE_SHOT);
 
 	// --dec-profile / SPU_LDPC_PROFILE. Forcing the executor's own flag to match ours keeps the two
 	// from disagreeing: return_profiling_times() throws when nothing was recorded. No lock needed

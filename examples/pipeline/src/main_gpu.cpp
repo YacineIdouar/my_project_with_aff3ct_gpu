@@ -14,6 +14,7 @@
 #include <aff3ct.hpp>
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
 #include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
+#include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_prng_gpu.hpp"
 using namespace aff3ct;
@@ -201,6 +202,14 @@ static void print_gpu_options_help()
     std::cout << "                    at the end of the run. Works on every decoder backend"        << std::endl;
     std::cout << "                    (SYCL reports the host side only, see the report's note)."    << std::endl;
     std::cout << "                    Same as SPU_LDPC_PROFILE=1"                                   << std::endl;
+    std::cout << "  --gpu-dispatch <mode>  'cached' or 'one_shot'                          [cached]"
+              << std::endl;
+    std::cout << "                    'cached' records the chain of kernels once and replays it -"   << std::endl;
+    std::cout << "                    a VkCommandBuffer on Vulkan, a CUDA graph on CUDA - so a"      << std::endl;
+    std::cout << "                    steady-state frame costs one submit. 'one_shot' reissues"      << std::endl;
+    std::cout << "                    every kernel each frame. Same output either way; they differ"  << std::endl;
+    std::cout << "                    in host-side launch cost. Also settable with the"              << std::endl;
+    std::cout << "                    SPU_GPU_DISPATCH_MODE environment variable"                    << std::endl;
     std::cout << std::endl;
 }
 
@@ -241,6 +250,10 @@ struct params
     // --dec-profile: time every decode's launch cost and, where the backend can report it, its
     // device time; a summary is printed once the pipeline has stopped. Backend independent.
     bool dec_profile = gpu_prof::enabled();
+
+    // --gpu-dispatch: replay a recorded chain (Vulkan command buffer / CUDA graph) or reissue the
+    // kernels every frame. Backend independent.
+    gpu_dispatch::mode dispatch = gpu_dispatch::get();
 
     int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
     int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
@@ -430,6 +443,18 @@ void init_params(int argc, char** argv, params &p)
         gpu_prof::set_enabled(true);
     }
 
+    std::string dispatch_str = gpu_dispatch::to_str(p.dispatch);
+    if (extract_option(args, "--gpu-dispatch", dispatch_str))
+    {
+        if (!gpu_dispatch::parse(dispatch_str, p.dispatch))
+        {
+            std::cerr << "(EE) unsupported '--gpu-dispatch' value '" << dispatch_str
+                      << "' (expected 'cached' or 'one_shot')." << std::endl;
+            std::exit(1);
+        }
+        gpu_dispatch::set(p.dispatch);
+    }
+
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());
     p.modem    = std::unique_ptr<factory::Modem           >(new factory::Modem           ());
@@ -472,6 +497,8 @@ void init_params(int argc, char** argv, params &p)
     }
 #endif
     std::cout << "#    ** Decode profiling              = " << (p.dec_profile ? "on" : "off") << std::endl;
+    std::cout << "#    ** GPU dispatch                  = " << gpu_dispatch::to_str(p.dispatch)
+              << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 

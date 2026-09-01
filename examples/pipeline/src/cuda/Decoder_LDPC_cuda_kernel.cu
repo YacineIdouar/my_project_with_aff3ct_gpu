@@ -15,6 +15,7 @@ are populated once during init and reused on every decode call.
 #include <iostream>
 
 #include "Decoder_LDPC_cuda_kernel.hpp"
+#include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg1.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"
@@ -337,11 +338,71 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 	dim3 t(256);
     dim3 b(blocks_for(num_vns, t.x));
 
-	// --dec-profile / SPU_LDPC_PROFILE. launch_with_profiling() records a pair of events around the
-	// kernel *on the same stream*, so profiling changes what is measured, not where the work runs.
-	// One helper instead of an if at each of the four call sites; the argument packs are long
-	// enough already.
+	// --dec-profile / SPU_LDPC_PROFILE.
 	const bool profiled = gpu_prof::enabled();
+
+	// Number of kernels one decode issues, reported in the profiling table's KERNELS column. The
+	// graph path below collapses them into a single launch, so the count has to be stated rather
+	// than inferred from the number of records.
+	const uint64_t n_kernels = 2 + (uint64_t)2 * num_iter;
+
+#ifdef PIPELINE_HAS_CUDA_GRAPH
+	// --gpu-dispatch. The chain is described the same way either mode runs it, and
+	// launch_chain_cached() does the choosing: CACHED captures it into a CUDA graph once and
+	// relaunches that graph, ONE_SHOT issues the kernels with cudaLaunchKernel() as before. This is
+	// the CUDA counterpart of VULKAN_executor::dispatch_chain_and_wait() and its recorded command
+	// buffer, which is why one --gpu-dispatch drives both.
+	executor->set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
+	                             ? spu::executor::cuda_dispatch_mode::CACHED
+	                             : spu::executor::cuda_dispatch_mode::ONE_SHOT);
+
+	using desc = spu::executor::CUDA_kernel_desc;
+	std::vector<desc> chain;
+	chain.reserve(n_kernels);
+
+	chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
+	  clip_channel_kernel, b, t, 0, llr_in, this->context->llr_total_buffer, num_vns));
+
+	// Mirrors the pointer swap of the per-kernel path below: the descriptor copies the pointer it
+	// was built with, so iteration 0 keeps reading the raw channel LLR.
+	float const* llr_total = llr_in;
+	for (uint32_t iter = 0; iter < num_iter; ++iter)
+	{
+		chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
+		  update_cn_kernel, blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, 0,
+		  llr_total, this->context->llr_msg_buffer, Zc, g_bg.cn, g_bg.cn_degree, g_bg.cn_stride,
+		  g_bg.num_rows, iter == 0));
+
+		chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
+		  update_vn_kernel, blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, 0,
+		  this->context->llr_msg_buffer, llr_in, this->context->llr_total_buffer, Zc, g_bg.vn,
+		  g_bg.vn_degree, g_bg.vn_stride, g_bg.num_cols, g_bg.num_rows));
+
+		llr_total = this->context->llr_total_buffer;
+	}
+
+	chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
+	  hard_decision_kernel, blocks_for(K, 256), 256, 0, llr_total, llr_bits_out, K));
+
+	if (profiled) executor->launch_chain_cached_with_profiling(chain);
+	else          executor->launch_chain_cached(chain);
+
+	executor->synchronize(native_stream);
+
+	if (profiled)
+	{
+		// One record for the whole chain, host-side only: a graph is a single launch, so unlike
+		// launch_with_profiling() there is no per-kernel event pair to read back.
+		const auto times = executor->return_profiling_times();
+		if (!times.empty()) this->prof.add(times[0].first, times[0].second, n_kernels);
+		executor->clear_profiling_records();
+	}
+#else
+	// StreamPU without CUDA graph capture: one launch per kernel, and --gpu-dispatch has nothing to
+	// choose between here (it still drives the Vulkan side). launch_with_profiling() records a pair
+	// of events around the kernel *on the same stream*, so profiling changes what is measured, not
+	// where the work runs. One helper instead of an if at each of the four call sites; the argument
+	// packs are long enough already.
 	auto dispatch = [&](auto kernel, auto grid, auto block, auto&&... args)
 	{
 		if (profiled)
@@ -373,6 +434,7 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 		this->prof.add(executor->return_profiling_times());
 		executor->clear_profiling_records();
 	}
+#endif
 
 	return num_iter - 1;
 }
