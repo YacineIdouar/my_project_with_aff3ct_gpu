@@ -329,6 +329,18 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 {
 	auto native_stream = stream->cast<cudaStream_t>();
 
+	// Hand the executor the task's stream. The per-kernel path below never needed this -- it passes
+	// the stream to every launch() explicitly -- but launch_chain_cached() takes no stream argument:
+	// it captures and relaunches on whatever stream the executor holds, and it is the executor's
+	// *stream* that owns the graph cache. Without this the chain would run on the private stream the
+	// CUDA_executor constructor made for itself, while the synchronize() below waited on the task's
+	// stream, which by then has no work on it -- so ldpc_decode() would return with the decode still
+	// in flight and the monitor would read V_K as it was being written.
+	//
+	// Cheap to repeat: after the first call the executor no longer owns a stream, so this is two
+	// assignments.
+	executor->set_stream(static_cast<spu::sp_cuda::CudaStream*>(stream));
+
 	const uint32_t Zc = g_bg.Zc;
 	const uint32_t num_vns = g_bg.num_cols * Zc;
 	const uint32_t num_cns = g_bg.num_rows * Zc;
