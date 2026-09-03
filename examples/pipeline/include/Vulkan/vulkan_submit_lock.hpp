@@ -12,7 +12,7 @@ namespace sp_vulkan
  * passes compute_queue_, obtained once from vkGetDeviceQueue(..., 0, &compute_queue_), to each
  * new VulkanStream. Only the command pool, command buffer and fence are per-stream.
  *
- * VULKAN_executor::dispatch_chain_and_wait() then calls vkQueueSubmit() on that shared queue
+ * VULKAN_executor::launch() then calls vkQueueSubmit() on that shared queue
  * with no lock (the one mutex in Vulkan_executor.cpp guards the pipeline cache, not the submit).
  * The Vulkan specification lists the queue parameter of vkQueueSubmit as externally
  * synchronised, so two threads submitting at the same time is undefined behaviour.

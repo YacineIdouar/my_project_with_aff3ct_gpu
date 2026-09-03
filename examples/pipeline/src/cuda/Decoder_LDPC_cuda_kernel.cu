@@ -330,7 +330,7 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 	auto native_stream = stream->cast<cudaStream_t>();
 
 	// Hand the executor the task's stream. The per-kernel path below never needed this -- it passes
-	// the stream to every launch() explicitly -- but launch_chain_cached() takes no stream argument:
+	// the stream to every launch() explicitly -- but launch() takes no stream argument:
 	// it captures and relaunches on whatever stream the executor holds, and it is the executor's
 	// *stream* that owns the graph cache. Without this the chain would run on the private stream the
 	// CUDA_executor constructor made for itself, while the synchronize() below waited on the task's
@@ -358,16 +358,14 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 	// than inferred from the number of records.
 	const uint64_t n_kernels = 2 + (uint64_t)2 * num_iter;
 
-#ifdef PIPELINE_HAS_CUDA_GRAPH
-	// --gpu-dispatch. The chain is described the same way either mode runs it, and
-	// launch_chain_cached() does the choosing: CACHED captures it into a CUDA graph once and
-	// relaunches that graph, ONE_SHOT issues the kernels with cudaLaunchKernel() as before. This is
-	// the CUDA counterpart of VULKAN_executor::dispatch_chain_and_wait() and its recorded command
-	// buffer, which is why one --gpu-dispatch drives both.
-	executor->set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
-	                             ? spu::executor::cuda_dispatch_mode::CACHED
-	                             : spu::executor::cuda_dispatch_mode::ONE_SHOT);
-
+	// --gpu-dispatch selects how StreamPU issues the chain, through SPU_CUDA_DISPATCH_MODE (see
+	// gpu_dispatch_mode.hpp): CACHED captures it into a CUDA graph once and relaunches that graph,
+	// ONE_SHOT issues the kernels with cudaLaunchKernel() as before. One switch drives CUDA and
+	// Vulkan alike, which is why the chain is described the same way either mode runs it.
+	//
+	// The chain is also a candidate for fusion: if the task next to this one in the pipeline stage
+	// runs on the same API and device, both chains go out as a single graph with one synchronisation.
+	// Nothing here has to opt in -- see StreamPU's Device/Gpu_batch.hpp.
 	using desc = spu::executor::CUDA_kernel_desc;
 	std::vector<desc> chain;
 	chain.reserve(n_kernels);
@@ -375,8 +373,8 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 	chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
 	  clip_channel_kernel, b, t, 0, llr_in, this->context->llr_total_buffer, num_vns));
 
-	// Mirrors the pointer swap of the per-kernel path below: the descriptor copies the pointer it
-	// was built with, so iteration 0 keeps reading the raw channel LLR.
+	// The descriptor copies the pointer it was built with, so iteration 0 keeps reading the raw
+	// channel LLR.
 	float const* llr_total = llr_in;
 	for (uint32_t iter = 0; iter < num_iter; ++iter)
 	{
@@ -396,57 +394,23 @@ sp_cuda::Cuda_decoder::ldpc_decode(
 	chain.push_back(spu::executor::CUDA_executor::make_kernel_desc(
 	  hard_decision_kernel, blocks_for(K, 256), 256, 0, llr_total, llr_bits_out, K));
 
-	if (profiled) executor->launch_chain_cached_with_profiling(chain);
-	else          executor->launch_chain_cached(chain);
+	if (profiled) executor->launch_profiled(chain);
+	else          executor->launch(chain);
 
+	// A no-op while the chain has been accumulated into an open batch: the run's last task then owes
+	// the single wait for all of them. Outside a batch it waits exactly as before.
 	executor->synchronize(native_stream);
 
 	if (profiled)
 	{
-		// One record for the whole chain, host-side only: a graph is a single launch, so unlike
-		// launch_with_profiling() there is no per-kernel event pair to read back.
-		const auto times = executor->return_profiling_times();
-		if (!times.empty()) this->prof.add(times[0].first, times[0].second, n_kernels);
-		executor->clear_profiling_records();
+		// One record for the whole chain: a graph is a single launch, so there is no per-kernel
+		// boundary left to attribute time to. Empty when the chain joined a fused run -- the cost then
+		// belongs to the run and lives in StreamPU's batch counters, and a zero here would mean "not
+		// measured", never "free".
+		const auto times = executor->get_timings();
+		if (!times.empty()) this->prof.add(times[0].cpu_us, times[0].gpu_us, n_kernels);
+		executor->clear_timings();
 	}
-#else
-	// StreamPU without CUDA graph capture: one launch per kernel, and --gpu-dispatch has nothing to
-	// choose between here (it still drives the Vulkan side). launch_with_profiling() records a pair
-	// of events around the kernel *on the same stream*, so profiling changes what is measured, not
-	// where the work runs. One helper instead of an if at each of the four call sites; the argument
-	// packs are long enough already.
-	auto dispatch = [&](auto kernel, auto grid, auto block, auto&&... args)
-	{
-		if (profiled)
-			executor->launch_with_profiling(
-			  kernel, grid, block, 0, native_stream, std::forward<decltype(args)>(args)...);
-		else
-			executor->launch(kernel, grid, block, 0, native_stream, std::forward<decltype(args)>(args)...);
-	};
-
-	dispatch(clip_channel_kernel, b, t, llr_in, this->context->llr_total_buffer, num_vns);
-
-	float const* llr_total = llr_in;
-
-	for (uint32_t iter = 0; iter < num_iter; ++iter)
-	{
-		dispatch(update_cn_kernel, blocks_for(num_cns, NODE_KERNEL_BLOCK), thread2d, llr_total, this->context->llr_msg_buffer, Zc, g_bg.cn, g_bg.cn_degree, g_bg.cn_stride, g_bg.num_rows, iter == 0);
-		dispatch(update_vn_kernel, blocks_for(num_vns, NODE_KERNEL_BLOCK), thread2d, this->context->llr_msg_buffer, llr_in, this->context->llr_total_buffer, Zc, g_bg.vn, g_bg.vn_degree, g_bg.vn_stride, g_bg.num_cols, g_bg.num_rows);
-		llr_total = this->context->llr_total_buffer;
-	}
-	dispatch(hard_decision_kernel, blocks_for(K, 256), 256, llr_total, llr_bits_out, K);
-
-	executor->synchronize(native_stream);
-
-	// After the sync: the events the launches recorded only hold a time once the work completed.
-	// clear_profiling_records() is mandatory here -- the records (and their events) would otherwise
-	// pile up for the lifetime of the executor and every decode would replay the whole history.
-	if (profiled)
-	{
-		this->prof.add(executor->return_profiling_times());
-		executor->clear_profiling_records();
-	}
-#endif
 
 	return num_iter - 1;
 }

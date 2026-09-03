@@ -126,15 +126,11 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
-	// --gpu-dispatch. CACHED reuses the recorded VkCommandBuffer for this exact chain; ONE_SHOT
-	// re-records it every frame. Set explicitly rather than left to the executor's environment
-	// default, so one switch drives this and the CUDA graph path together.
-	exec.set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
-	                         ? spu::executor::vk_dispatch_mode::CACHED
-	                         : spu::executor::vk_dispatch_mode::ONE_SHOT);
+	// --gpu-dispatch is applied through SPU_VULKAN_DISPATCH_MODE (see gpu_dispatch_mode.hpp):
+	// StreamPU has no per-executor setter any more, the mode being a property of the whole run.
 
 	// --dec-profile / SPU_LDPC_PROFILE. Forcing the executor's own flag to match ours keeps the two
-	// from disagreeing: return_profiling_times() throws when nothing was recorded. No lock needed
+	// from disagreeing: get_timings() reports what was actually recorded. No lock needed
 	// around the executor here -- unlike the CUDA/HIP channels, this one is built per call.
 	const bool profiled = gpu_prof::enabled();
 	exec.set_profiling(profiled);
@@ -147,9 +143,10 @@ sp_vulkan::Vulkan_channel_prng::add_noise(const float* d_x,
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
 		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
-		exec.dispatch_chain_and_wait(chain, profiled);
+		if (profiled) exec.launch_profiled(chain);
+		else          exec.launch(chain);
 	}
 
 	// One record for the one dispatch: (host-side launch, GPU time of the shader).
-	if (profiled) this->prof.add(exec.return_profiling_times());
+	if (profiled) this->prof.add(exec.get_timings());
 }

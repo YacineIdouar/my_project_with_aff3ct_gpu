@@ -12,7 +12,7 @@ through a VkBuffer bound into a descriptor set, and the check/variable-node upda
 kernels each need more storage buffers (4 and 5 respectively) than a single fixed-in/
 fixed-out dispatch can express, so the whole decode iteration is built as one chain of
 spu::executor::VULKAN_dispatch_desc entries and submitted with a single
-dispatch_chain_and_wait() call (one submit + one fence wait for the whole decode,
+launch() call (one submit + one fence wait for the whole decode,
 instead of one round trip per kernel launch).
 */
 
@@ -312,15 +312,11 @@ Vulkan_decoder_rebuilt::ldpc_decode(
 	spu::executor::VULKAN_executor exec(vulkan_stream->device());
 	exec.set_stream(vulkan_stream);
 
-	// --gpu-dispatch. CACHED reuses the recorded VkCommandBuffer for this exact chain; ONE_SHOT
-	// re-records it every frame. Set explicitly rather than left to the executor's environment
-	// default, so one switch drives this and the CUDA graph path together.
-	exec.set_dispatch_mode(gpu_dispatch::get() == gpu_dispatch::mode::CACHED
-	                         ? spu::executor::vk_dispatch_mode::CACHED
-	                         : spu::executor::vk_dispatch_mode::ONE_SHOT);
+	// --gpu-dispatch is applied through SPU_VULKAN_DISPATCH_MODE (see gpu_dispatch_mode.hpp):
+	// StreamPU has no per-executor setter any more, the mode being a property of the whole run.
 
 	// Profiling is a per-run choice (--dec-vk-profile / SPU_VULKAN_PROFILE), so force the
-	// executor's own flag to match ours instead of letting the two disagree: return_profiling_times()
+	// executor's own flag to match ours instead of letting the two disagree: get_timings()
 	// throws when nothing was recorded, and would silently collect behind our back if it were on
 	// here and off there.
 	const bool profiled = gpu_prof::enabled();
@@ -335,17 +331,18 @@ Vulkan_decoder_rebuilt::ldpc_decode(
 	{
 		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
 		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
-		exec.dispatch_chain_and_wait(chain, profiled);
+		if (profiled) exec.launch_profiled(chain);
+		else          exec.launch(chain);
 	}
 
 	// One record per launch, and the chain is one launch, so this is a single (cpu, gpu) pair in
 	// microseconds. Folded into this decoder's totals; main_gpu.cpp prints them once the pipeline
 	// has stopped.
-	if (profiled) this->prof.add(exec.return_profiling_times());
+	if (profiled) this->prof.add(exec.get_timings());
 
 	// The invalidate of llr_bits_out that used to sit here has been removed too. The hard-decision
 	// dispatch wrote that buffer (this task's V_K socket) and the downstream native tasks (the
-	// monitor's check_errors, the sink's send_count) read it from the CPU; dispatch_chain_and_wait()
+	// monitor's check_errors, the sink's send_count) read it from the CPU; launch()
 	// already fence-waited, so the write itself has landed. The invalidate only mattered on
 	// hardware where the allocation is cached but not coherent, where the CPU's view can be stale.
 

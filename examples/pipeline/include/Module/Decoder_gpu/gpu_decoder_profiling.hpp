@@ -7,7 +7,7 @@ across the four backends (CUDA, HIP, SYCL, Vulkan).
 Every backend's executor already knows how to time a launch -- CUDA_executor and HIP_executor with
 a pair of events around the kernel, VULKAN_executor with a pair of GPU timestamps around the
 dispatch chain -- and each hands the result back as a vector of (cpu_us, gpu_us) pairs from
-return_profiling_times(). What none of them does is survive the decode: the records live on the
+get_timings(). What none of them does is survive the decode: the records live on the
 executor, and reporting them means someone has to collect and aggregate them.
 
 That is all this header is. One accumulator per handler instance, registered in a process-wide list
@@ -137,16 +137,24 @@ class accumulator
 	// summed into a single call-level (cpu, gpu) pair. Summing rather than averaging is the point --
 	// what a frame costs is the sum of what its kernels cost, and that is what compares against
 	// Vulkan's single chain submit.
-	void add(const std::vector<std::pair<float, float>>& times)
+	// Templated so this header stays free of StreamPU includes: it is also compiled into targets
+	// that have no StreamPU include path (obj-module), and only the GPU translation units ever
+	// instantiate it. 'times' is whatever the executor's get_timings() returns -- a range of
+	// { cpu_us, gpu_us }.
+	template<typename Timings>
+	void add(const Timings& times)
 	{
+		// Also the shape a fused run takes: the chain was accumulated rather than issued, so this
+		// executor recorded nothing and the cost sits in StreamPU's batch counters instead. Dropping
+		// the call keeps a "not measured" out of the averages, where it would read as zero cost.
 		if (times.empty()) return;
 
 		float cpu_us = 0.f;
 		float gpu_us = 0.f;
 		for (const auto& t : times)
 		{
-			cpu_us += t.first;
-			gpu_us += t.second;
+			cpu_us += t.cpu_us;
+			gpu_us += t.gpu_us;
 		}
 		add(cpu_us, gpu_us, times.size());
 	}

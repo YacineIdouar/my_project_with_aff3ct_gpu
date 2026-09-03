@@ -139,28 +139,30 @@ Cuda_channel::add_noise(const float*  d_x,
 			   spu::device_interface::GpuStream* stream)
 {
 	auto native_stream = stream->cast<cudaStream_t>();
+	// launch() takes no stream argument -- it issues onto whichever stream the executor holds, and
+	// that stream owns the graph cache -- so the task's stream has to be handed over here.
+	executor->set_stream(static_cast<spu::sp_cuda::CudaStream*>(stream));
     int active_threads = (n_samples + 1) / 2;
     int blocks = (active_threads + 256 - 1) / 256;
 
-	// --dec-profile / SPU_LDPC_PROFILE. The events launch_with_profiling() records sit on the same
+	// --dec-profile / SPU_LDPC_PROFILE. The timing launch_profiled() records covers the same
 	// stream as the kernel, so profiling changes what is measured, not where the work runs. No lock:
 	// clone() gives every replica of the channel module its own handler, hence its own executor.
 	if (!gpu_prof::enabled())
 	{
-		executor->launch(awgn_add_noise, blocks, 256, 0, native_stream, d_x, d_y, n_samples, sigma,
+		executor->launch(awgn_add_noise, blocks, 256, 0, d_x, d_y, n_samples, sigma,
 		                 static_cast<curandStateXORWOW_t*>(d_states));
 		executor->synchronize(native_stream);
 		return;
 	}
 
-	executor->launch_with_profiling(
-	  awgn_add_noise, blocks, 256, 0, native_stream, d_x, d_y, n_samples, sigma,
+	executor->launch_profiled(awgn_add_noise, blocks, 256, 0, d_x, d_y, n_samples, sigma,
 	  static_cast<curandStateXORWOW_t*>(d_states));
 	executor->synchronize(native_stream);
 
 	// After the sync: the events only hold a time once the kernel completed. Clearing is mandatory,
 	// or the records (and their events) pile up and every call replays the whole history.
-	this->prof.add(executor->return_profiling_times());
-	executor->clear_profiling_records();
+	this->prof.add(executor->get_timings());
+	executor->clear_timings();
 }
 

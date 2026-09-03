@@ -18,9 +18,14 @@ both fall back to the plain path when the caller varies those parameters. Compar
 strategies is the whole point of having them, so the choice belongs on the command line rather
 than in the source: --gpu-dispatch in main_gpu.cpp, or SPU_GPU_DISPATCH_MODE in the environment.
 
-This deliberately does not touch StreamPU's own SPU_VULKAN_DISPATCH_MODE / SPU_CUDA_DISPATCH_MODE:
-those set the default for *every* executor in the process, including ones this example does not
-own. What is set here is applied explicitly, per executor, at the sites that build one.
+This works by setting StreamPU's own SPU_CUDA_DISPATCH_MODE / SPU_VULKAN_DISPATCH_MODE, which is
+now the only way to choose: StreamPU dropped the per-executor set_dispatch_mode() when it collapsed
+to a single launch path, on the grounds that a no-graph run is a whole-run comparison rather than a
+per-module setting. Those variables are read once, on the first launch, so set() has to run before
+any module builds an executor -- which is where main_gpu.cpp calls it, from argument parsing.
+
+Consequence worth knowing: the choice is now process-wide rather than per executor. For this example
+that is the same thing, since it owns every executor in its process.
 */
 
 #include <cstdlib>
@@ -56,9 +61,16 @@ inline mode& storage()
 
 inline mode get() { return detail::storage(); }
 
-// Set it before the first frame. A module reads it on every call, so flipping it mid-run would
-// leave half the frames measured one way and half the other.
-inline void set(mode m) { detail::storage() = m; }
+// Set it before the first frame -- and, more strictly, before any module builds an executor:
+// StreamPU reads these variables once, on the first launch, and caches the answer.
+inline void set(mode m)
+{
+	detail::storage() = m;
+	const char* value = (m == mode::CACHED) ? "cached" : "one_shot";
+	setenv("SPU_CUDA_DISPATCH_MODE", value, 1);
+	setenv("SPU_VULKAN_DISPATCH_MODE", value, 1);
+	setenv("SPU_HIP_DISPATCH_MODE", value, 1);
+}
 
 inline bool parse(const std::string& s, mode& out)
 {

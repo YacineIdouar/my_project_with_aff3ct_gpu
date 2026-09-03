@@ -121,6 +121,9 @@ sp_hip::Hip_channel_prng::add_noise(const float* d_x,
     if (n_samples <= 0) return;
 
     auto native_stream = stream->cast<hipStream_t>();
+	// launch() takes no stream argument -- it issues onto whichever stream the executor holds, and
+	// that stream owns the graph cache -- so the task's stream has to be handed over here.
+	executor->set_stream(static_cast<spu::sp_hip::HipStream*>(stream));
 
     const int active_threads = (n_samples + SAMPLES_PER_THREAD - 1) / SAMPLES_PER_THREAD;
     const int blocks         = (active_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
@@ -129,25 +132,25 @@ sp_hip::Hip_channel_prng::add_noise(const float* d_x,
        generator, and it lives on the host, so no device memory is touched between frames. */
     const unsigned long long counter = this->call_counter.fetch_add(1ull);
 
-    // --dec-profile / SPU_LDPC_PROFILE. The events launch_with_profiling() records sit on the same
+    // --dec-profile / SPU_LDPC_PROFILE. The timing launch_profiled() records covers the same
     // stream as the kernel, so profiling changes what is measured, not where the work runs. No lock:
     // clone() gives every replica of the channel module its own handler, hence its own executor.
     if (!gpu_prof::enabled())
     {
-        executor->launch(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0, native_stream,
+        executor->launch(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0,
                          d_x, d_y, n_samples, sigma, this->seed_lo, this->seed_hi,
                          (uint32_t)(counter & 0xFFFFFFFFull), (uint32_t)(counter >> 32));
         executor->synchronize(native_stream);
         return;
     }
 
-    executor->launch_with_profiling(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0, native_stream,
+    executor->launch_profiled(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0,
                                     d_x, d_y, n_samples, sigma, this->seed_lo, this->seed_hi,
                                     (uint32_t)(counter & 0xFFFFFFFFull), (uint32_t)(counter >> 32));
     executor->synchronize(native_stream);
 
     // After the sync: the events only hold a time once the kernel completed. Clearing is mandatory,
     // or the records (and their events) pile up and every call replays the whole history.
-    this->prof.add(executor->return_profiling_times());
-    executor->clear_profiling_records();
+    this->prof.add(executor->get_timings());
+    executor->clear_timings();
 }

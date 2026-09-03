@@ -156,31 +156,10 @@ find_package(cpptrace CONFIG 0.4.1)
 find_package(StreamPU REQUIRED)
 find_package(AFF3CT  REQUIRED)
 
-# CUDA graph capture (CUDA_executor::launch_chain_cached and cuda_dispatch_mode) arrived in
-# StreamPU after this example was written, and the CUDA decoder falls back to launching its
-# kernels one by one without it. Probing the installed header keeps the example buildable against
-# both, rather than requiring everyone to upgrade in lockstep.
-set(PIPELINE_HAS_CUDA_GRAPH OFF)
-get_target_property(_spu_includes spu::spu-static-lib INTERFACE_INCLUDE_DIRECTORIES)
-foreach(_dir ${_spu_includes})
-    if(EXISTS "${_dir}/Device/Cuda/Cuda_executor.hpp")
-        file(STRINGS "${_dir}/Device/Cuda/Cuda_executor.hpp" _chain_api REGEX "launch_chain_cached")
-        if(_chain_api)
-            set(PIPELINE_HAS_CUDA_GRAPH ON)
-        endif()
-    endif()
-endforeach()
-if(DECODER_CUDA)
-    if(PIPELINE_HAS_CUDA_GRAPH)
-        message(STATUS "pipeline - StreamPU provides CUDA graph capture: --gpu-dispatch drives it")
-        # Set here rather than beside obj-cuda's other definitions: that target is declared well
-        # before find_package(StreamPU), so the probe above has not run yet at that point.
-        target_compile_definitions(obj-cuda PRIVATE PIPELINE_HAS_CUDA_GRAPH)
-    else()
-        message(STATUS "pipeline - StreamPU has no CUDA graph capture: --gpu-dispatch affects Vulkan only "
-                       "(update StreamPU to get the CUDA side)")
-    endif()
-endif()
+# The CUDA decoder builds its kernels as one chain and hands it to StreamPU's launch(), which is
+# unconditional API now -- there is no per-kernel fallback to probe for, and no compile definition to
+# set. --gpu-dispatch chooses how that chain is issued (graph vs one-by-one) through
+# SPU_CUDA_DISPATCH_MODE; see include/Module/Decoder_gpu/gpu_dispatch_mode.hpp.
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
