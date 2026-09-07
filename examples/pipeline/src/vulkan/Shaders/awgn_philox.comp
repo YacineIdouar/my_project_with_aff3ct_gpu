@@ -6,7 +6,9 @@ Vulkan port of awgn_add_noise_philox in ../../cuda/Channel_AWGN_LLR_prng_cuda.cu
 The generator itself is shared with the CUDA path in spirit and line-for-line in code: this
 shader includes the GLSL transliteration of include/Rng/Philox4x32.hpp, so the index/counter/
 seed arithmetic and the Box-Muller step are identical. For the same (n, sigma, seed, counter)
-and the same dispatch geometry, this produces bit-identical noise to the CUDA kernel.
+and the same dispatch geometry, this produces bit-identical noise to the CUDA kernel -- the counter
+reaching this shader through a buffer rather than a push constant changes nothing about the value
+the generator sees.
 */
 #include "philox4x32.glsl"
 
@@ -24,14 +26,26 @@ layout(set = 0, binding = 1) writeonly buffer OutBuf
 }
 out_buf;
 
+// The per-dispatch counter, and *only* it, lives in a buffer rather than in the push constants.
+//
+// Push constants are baked into the command buffer, so they are part of the key StreamPU caches a
+// recording under (see VulkanStream::find_recorded_dispatch). A value that changes every frame --
+// which this counter must, or successive frames would draw the same noise -- would therefore miss
+// that cache on every single frame and pay a full descriptor-set + command-buffer re-record. Read
+// through a descriptor instead, the recording stays valid for the whole run and the host only
+// writes eight bytes into a mapped buffer before each submit.
+layout(set = 0, binding = 2) readonly buffer CtrBuf
+{
+    uint word[2]; // [0] = counter low 32 bits, [1] = high
+}
+ctr_buf;
+
 layout(push_constant) uniform PushConstants
 {
     uint  n;       // number of samples
     float sigma;   // noise standard deviation
     uint  seed_lo; // Philox key word 0
     uint  seed_hi; // Philox key word 1
-    uint  ctr_lo;  // per-dispatch counter, low  32 bits
-    uint  ctr_hi;  // per-dispatch counter, high 32 bits
 }
 pc;
 
@@ -46,7 +60,7 @@ main()
     uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     if (idx >= pc.n) return;
 
-    vec4 noise = philox_awgn_noise4(idx, pc.ctr_lo, pc.ctr_hi, pc.seed_lo, pc.seed_hi);
+    vec4 noise = philox_awgn_noise4(idx, ctr_buf.word[0], ctr_buf.word[1], pc.seed_lo, pc.seed_hi);
 
     for (uint k = 0u; k < SAMPLES_PER_THREAD; k++)
     {

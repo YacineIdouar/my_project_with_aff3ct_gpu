@@ -28,7 +28,6 @@ instead of one round trip per kernel launch).
 #include <vulkan/vulkan.h>
 
 #include "Vulkan/Decoder_LDPC_vulkan_kernel.hpp"
-#include "Vulkan/vulkan_submit_lock.hpp"
 #include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
 #include "Device/Devices_manager.hpp"
 #include "Device/Vulkan/Vulkan_device.hpp"
@@ -328,12 +327,13 @@ Vulkan_decoder_rebuilt::ldpc_decode(
 	// VULKAN_device::allocate_memory / flush_memory -- it is a no-op on coherent allocations).
 	// Restore it if a platform ever reports corrupted LLRs.
 
-	{
-		// Every VulkanStream shares one VkQueue; vkQueueSubmit() needs external synchronisation.
-		std::lock_guard<std::mutex> submit_lock(sp_vulkan::submit_mutex());
-		if (profiled) exec.launch_profiled(chain);
-		else          exec.launch(chain);
-	}
+	// No submit lock here. StreamPU now takes the stream's queue mutex itself, around
+	// vkQueueSubmit alone, and deliberately leaves the fence wait outside it (see
+	// VULKAN_executor::submit_and_wait and VulkanStream::queue_mutex). Wrapping the whole launch as
+	// this used to would put the GPU wait inside a process-wide mutex shared with the channel,
+	// serialising the two stages on execution instead of only on the submit call.
+	if (profiled) exec.launch_profiled(chain);
+	else          exec.launch(chain);
 
 	// One record per launch, and the chain is one launch, so this is a single (cpu, gpu) pair in
 	// microseconds. Folded into this decoder's totals; main_gpu.cpp prints them once the pipeline
