@@ -186,30 +186,31 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "                    of no-copy, so its Y_N/V_K socket buffers stop rotating"      << std::endl;
     std::cout << "                    from one frame to the next (see init_utils())"                << std::endl;
-#ifdef DECODER_VULKAN
-    std::cout << "  --dec-vk-chain <impl>  Vulkan decoder implementation, 'cached' or       ["
-              << sp_vulkan::Vulkan_decoder::impl_to_str(sp_vulkan::Vulkan_decoder::get_default_impl())
-              << "]" << std::endl;
-    std::cout << "                    'rebuilt'. 'cached' describes the dispatch chain once and"    << std::endl;
-    std::cout << "                    reuses it (hits StreamPU's recorded-dispatch cache);"         << std::endl;
-    std::cout << "                    'rebuilt' rebuilds it on every decode. Same output, they"     << std::endl;
-    std::cout << "                    differ in host-side launch cost only. Also settable with"     << std::endl;
-    std::cout << "                    the SPU_LDPC_VULKAN_CHAIN environment variable"               << std::endl;
-#endif
-    std::cout << "  --dec-profile     Time each decode's host-side launch cost and, where the  [off]"
-              << std::endl;
-    std::cout << "                    backend can report it, its device time; print a summary"      << std::endl;
-    std::cout << "                    at the end of the run. Works on every decoder backend"        << std::endl;
-    std::cout << "                    (SYCL reports the host side only, see the report's note)."    << std::endl;
-    std::cout << "                    Same as SPU_LDPC_PROFILE=1"                                   << std::endl;
-    std::cout << "  --gpu-dispatch <mode>  'cached' or 'one_shot'                          [cached]"
-              << std::endl;
+    std::cout << std::endl;
+
+    // These select *how* the work reaches the device rather than what runs, and they are set from
+    // the environment only -- there is deliberately no command-line equivalent, so there is exactly
+    // one place the choice can be made and no way for two of them to disagree.
+    std::cout << "environment variables:" << std::endl;
+    std::cout << "  SPU_GPU_DISPATCH_MODE  'cached' (default) or 'one_shot'"                        << std::endl;
     std::cout << "                    'cached' records the chain of kernels once and replays it -"   << std::endl;
     std::cout << "                    a VkCommandBuffer on Vulkan, a CUDA graph on CUDA - so a"      << std::endl;
     std::cout << "                    steady-state frame costs one submit. 'one_shot' reissues"      << std::endl;
     std::cout << "                    every kernel each frame. Same output either way; they differ"  << std::endl;
-    std::cout << "                    in host-side launch cost. Also settable with the"              << std::endl;
-    std::cout << "                    SPU_GPU_DISPATCH_MODE environment variable"                    << std::endl;
+    std::cout << "                    in host-side launch cost. Sets StreamPU's own"                 << std::endl;
+    std::cout << "                    SPU_{CUDA,VULKAN,HIP}_DISPATCH_MODE, each of which still"      << std::endl;
+    std::cout << "                    overrides it for its backend"                                  << std::endl;
+    std::cout << "  SPU_LDPC_PROFILE=1     Time each decode's host-side launch cost and, where the"  << std::endl;
+    std::cout << "                    backend can report it, its device time; print a summary"      << std::endl;
+    std::cout << "                    at the end of the run. Works on every decoder backend"        << std::endl;
+    std::cout << "                    (SYCL reports the host side only, see the report's note)"     << std::endl;
+#ifdef DECODER_VULKAN
+    std::cout << "  SPU_LDPC_VULKAN_CHAIN  Vulkan decoder implementation, 'cached' (default) or"    << std::endl;
+    std::cout << "                    'rebuilt'. 'cached' describes the dispatch chain once and"    << std::endl;
+    std::cout << "                    reuses it (hits StreamPU's recorded-dispatch cache);"         << std::endl;
+    std::cout << "                    'rebuilt' rebuilds it on every decode. Same output, they"     << std::endl;
+    std::cout << "                    differ in host-side launch cost only"                         << std::endl;
+#endif
     std::cout << std::endl;
 }
 
@@ -242,16 +243,16 @@ struct params
     bool dec_stage_copy = false; // --dec-stage-copy: copy adaptors around the decoder stage
 
 #ifdef DECODER_VULKAN
-    // --dec-vk-chain: which of the two Vulkan decoder implementations every decoder is built from.
+    // SPU_LDPC_VULKAN_CHAIN: which of the two Vulkan decoder implementations decoders are built from.
     // Only read when the decoder actually runs on Vulkan; both are always compiled.
     sp_vulkan::decoder_impl dec_vk_chain = sp_vulkan::Vulkan_decoder::get_default_impl();
 #endif
 
-    // --dec-profile: time every decode's launch cost and, where the backend can report it, its
+    // SPU_LDPC_PROFILE: time every decode's launch cost and, where the backend can report it, its
     // device time; a summary is printed once the pipeline has stopped. Backend independent.
     bool dec_profile = gpu_prof::enabled();
 
-    // --gpu-dispatch: replay a recorded chain (Vulkan command buffer / CUDA graph) or reissue the
+    // SPU_GPU_DISPATCH_MODE: replay a recorded chain (Vulkan command buffer / CUDA graph) or reissue
     // kernels every frame. Backend independent.
     gpu_dispatch::mode dispatch = gpu_dispatch::get();
 
@@ -419,41 +420,9 @@ void init_params(int argc, char** argv, params &p)
 
     p.dec_stage_copy = extract_flag(args, "--dec-stage-copy");
 
-#ifdef DECODER_VULKAN
-    // Applied to the process-wide default right here, before init_modules() builds the first
-    // decoder: replicated stages build theirs during the pipeline build and each keeps whatever
-    // was current then.
-    std::string vk_chain_str = sp_vulkan::Vulkan_decoder::impl_to_str(p.dec_vk_chain);
-    if (extract_option(args, "--dec-vk-chain", vk_chain_str))
-    {
-        if (!sp_vulkan::Vulkan_decoder::str_to_impl(vk_chain_str, p.dec_vk_chain))
-        {
-            std::cerr << "(EE) unsupported '--dec-vk-chain' value '" << vk_chain_str
-                      << "' (expected 'cached' or 'rebuilt')." << std::endl;
-            std::exit(1);
-        }
-        sp_vulkan::Vulkan_decoder::set_default_impl(p.dec_vk_chain);
-    }
-
-#endif
-
-    if (extract_flag(args, "--dec-profile"))
-    {
-        p.dec_profile = true;
-        gpu_prof::set_enabled(true);
-    }
-
-    std::string dispatch_str = gpu_dispatch::to_str(p.dispatch);
-    if (extract_option(args, "--gpu-dispatch", dispatch_str))
-    {
-        if (!gpu_dispatch::parse(dispatch_str, p.dispatch))
-        {
-            std::cerr << "(EE) unsupported '--gpu-dispatch' value '" << dispatch_str
-                      << "' (expected 'cached' or 'one_shot')." << std::endl;
-            std::exit(1);
-        }
-        gpu_dispatch::set(p.dispatch);
-    }
+    // No parsing for the dispatch mode, the decoder profiling or the Vulkan chain implementation:
+    // all three are read from the environment where 'p' was initialised, and the environment is the
+    // only place they can be set. See print_help() for the variable names.
 
     p.source   = std::unique_ptr<factory::Source          >(new factory::Source          ());
     p.codec    = std::unique_ptr<factory::Codec_LDPC      >(new factory::Codec_LDPC      ());

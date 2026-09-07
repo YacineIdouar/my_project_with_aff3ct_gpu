@@ -15,8 +15,10 @@ StreamPU offers the same choice twice, under two names and two mechanisms:
 
 Both replace N per-frame launches with one submit, both are keyed on the launch parameters, and
 both fall back to the plain path when the caller varies those parameters. Comparing the two
-strategies is the whole point of having them, so the choice belongs on the command line rather
-than in the source: --gpu-dispatch in main_gpu.cpp, or SPU_GPU_DISPATCH_MODE in the environment.
+strategies is the whole point of having them, so the choice lives in the environment and nowhere
+else: SPU_GPU_DISPATCH_MODE for both backends at once, or StreamPU's own
+SPU_{CUDA,VULKAN,HIP}_DISPATCH_MODE for one of them. There is deliberately no command-line switch:
+a binary-level flag would be a second way to say the same thing, and the two could disagree.
 
 This works by setting StreamPU's own SPU_CUDA_DISPATCH_MODE / SPU_VULKAN_DISPATCH_MODE, which is
 now the only way to choose: StreamPU dropped the per-executor set_dispatch_mode() when it collapsed
@@ -49,11 +51,24 @@ inline mode& storage()
 		// CACHED unless the environment explicitly asks otherwise, matching what both StreamPU
 		// backends default to.
 		const char* env = std::getenv("SPU_GPU_DISPATCH_MODE");
-		if (env == nullptr) return mode::CACHED;
+		const mode chosen = [env]()
+		{
+			if (env == nullptr) return mode::CACHED;
+			const std::string s(env);
+			if (s == "one_shot" || s == "ONE_SHOT" || s == "0") return mode::ONE_SHOT;
+			return mode::CACHED;
+		}();
 
-		const std::string s(env);
-		if (s == "one_shot" || s == "ONE_SHOT" || s == "0") return mode::ONE_SHOT;
-		return mode::CACHED;
+		// Forward to StreamPU's own per-backend variables here rather than in set(): with the
+		// command-line switch gone, reading the aggregate is the only moment the choice is made,
+		// so this is what makes SPU_GPU_DISPATCH_MODE reach StreamPU at all. Only ever fills in
+		// what the user has not set directly -- the 0 in setenv() means "do not overwrite" -- so
+		// setting SPU_CUDA_DISPATCH_MODE alone still wins for that backend.
+		const char* value = (chosen == mode::CACHED) ? "cached" : "one_shot";
+		setenv("SPU_CUDA_DISPATCH_MODE", value, 0);
+		setenv("SPU_VULKAN_DISPATCH_MODE", value, 0);
+		setenv("SPU_HIP_DISPATCH_MODE", value, 0);
+		return chosen;
 	}();
 	return m;
 }
@@ -61,8 +76,9 @@ inline mode& storage()
 
 inline mode get() { return detail::storage(); }
 
-// Set it before the first frame -- and, more strictly, before any module builds an executor:
-// StreamPU reads these variables once, on the first launch, and caches the answer.
+// Kept for programmatic use; nothing in this example calls it any more, since the mode comes from
+// the environment. Set it before the first frame -- and, more strictly, before any module builds an
+// executor: StreamPU reads these variables once, on the first launch, and caches the answer.
 inline void set(mode m)
 {
 	detail::storage() = m;
