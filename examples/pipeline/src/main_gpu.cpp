@@ -237,7 +237,7 @@ static int extract_int_option(std::vector<char*>& args, const char* opt, const i
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
-    float  ebn0      = 2.40f; // SNR value
+    float  ebn0      = 5.40f; // SNR value
     float  R;                  // code rate (R=K/N)
 
     bool dec_stage_copy = false; // --dec-stage-copy: copy adaptors around the decoder stage
