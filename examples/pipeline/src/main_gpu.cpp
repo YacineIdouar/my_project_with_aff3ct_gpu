@@ -466,8 +466,7 @@ void init_params(int argc, char** argv, params &p)
     }
 #endif
     std::cout << "#    ** Decode profiling              = " << (p.dec_profile ? "on" : "off") << std::endl;
-    std::cout << "#    ** GPU dispatch                  = " << gpu_dispatch::to_str(p.dispatch)
-              << std::endl;
+    std::cout << "#    ** GPU dispatch                  = " << gpu_dispatch::describe() << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
