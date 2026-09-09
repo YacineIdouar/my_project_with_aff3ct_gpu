@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <random>
@@ -167,6 +168,15 @@ static bool extract_flag(std::vector<char*>& args, const char* opt)
     return false;
 }
 
+// The pipeline's stages, in the order init_utils() builds them. Named here so that --pip-threads
+// can say which position is which when a list of the wrong length turns up.
+static const char* const stage_names[] = { "generate",
+                                           "encode -> modulate",
+                                           "add_noise -> demodulate -> depuncture",
+                                           "decode_siho_gpu",
+                                           "check_errors + send_count" };
+static constexpr size_t n_stages = sizeof(stage_names) / sizeof(stage_names[0]);
+
 // These are consumed before the factory parser runs, so they never appear in its own help output.
 static void print_gpu_options_help()
 {
@@ -182,6 +192,12 @@ static void print_gpu_options_help()
     std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
     std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
     std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
+    std::cout << "  --pip-threads <list>  Threads per pipeline stage             [1,4,1,1,1]"
+              << std::endl;
+    std::cout << "                    One comma-separated count per stage, in order:"                << std::endl;
+    for (size_t i = 0; i < n_stages; i++)
+        std::cout << "                      " << i << ": " << stage_names[i] << std::endl;
+    std::cout << "                    Widening a stage replicates its modules, one per thread"       << std::endl;
     std::cout << "  --snr-min  <flt>  First Eb/N0 (dB) of the sweep                          [5.40]"
               << std::endl;
     std::cout << "  --snr-max  <flt>  Sweep runs while Eb/N0 < this value (dB)               [5.41]"
@@ -240,6 +256,65 @@ static int extract_int_option(std::vector<char*>& args, const char* opt, const i
     }
 }
 
+// Parses "--pip-threads 1,4,1,3,1" into one count per stage. One option rather than one per stage:
+// the widths are only ever interesting as a set -- moving a thread from one stage to another is the
+// experiment -- and a single list is what a sweep script can vary in one place.
+static std::vector<int> extract_threads_list(std::vector<char*>& args,
+                                             const char* opt,
+                                             const std::vector<int>& def_value)
+{
+    std::string raw;
+    if (!extract_option(args, opt, raw)) return def_value;
+
+    std::vector<int> values;
+    std::string field;
+    std::istringstream stream(raw);
+    while (std::getline(stream, field, ','))
+    {
+        // Tolerate the spaces a quoted "1, 4, 1, 3, 1" leaves behind.
+        const size_t b = field.find_first_not_of(" \t");
+        const size_t e = field.find_last_not_of(" \t");
+        const std::string trimmed = (b == std::string::npos) ? "" : field.substr(b, e - b + 1);
+
+        int value = 0;
+        try
+        {
+            size_t consumed = 0;
+            value = std::stoi(trimmed, &consumed);
+            if (consumed != trimmed.size()) throw std::invalid_argument(trimmed);
+        }
+        catch (const std::exception&)
+        {
+            std::cerr << "(EE) '" << opt << "' expects comma-separated integers (got '" << field
+                      << "')." << std::endl;
+            std::exit(1);
+        }
+
+        // A stage cannot run on zero threads: the pipeline builds, then hangs with nothing executing
+        // that stage, which is a much worse way to find out than an error here.
+        if (value < 1)
+        {
+            std::cerr << "(EE) '" << opt << "' expects at least 1 thread per stage (got " << value
+                      << " for stage " << values.size() << ", " << stage_names[values.size() % n_stages]
+                      << ")." << std::endl;
+            std::exit(1);
+        }
+
+        values.push_back(value);
+    }
+
+    if (values.size() != n_stages)
+    {
+        std::cerr << "(EE) '" << opt << "' expects " << n_stages << " comma-separated counts, one per "
+                  << "pipeline stage (got " << values.size() << "):" << std::endl;
+        for (size_t i = 0; i < n_stages; i++)
+            std::cerr << "       stage " << i << ": " << stage_names[i] << std::endl;
+        std::exit(1);
+    }
+
+    return values;
+}
+
 static float extract_float_option(std::vector<char*>& args, const char* opt, const float def_value)
 {
     std::string raw;
@@ -261,7 +336,11 @@ static float extract_float_option(std::vector<char*>& args, const char* opt, con
 
 struct params
 {
-    size_t n_threads = std::thread::hardware_concurrency();
+    // --pip-threads: one count per pipeline stage, in the order init_utils() builds them. Replicating
+    // a stage clones its modules, so a GPU stage widened here gets one handler -- and one stream --
+    // per thread.
+    std::vector<int> pip_threads = { 1, 4, 1, 1, 1 };
+
     float  ebn0      = 5.40f; // SNR value (single point, kept for reference)
     float  ebn0_min  = 5.40f; // --snr-min:  first Eb/N0 of the sweep
     float  ebn0_max  = 5.41f; // --snr-max:  loop runs while ebn0 < ebn0_max
@@ -462,6 +541,8 @@ void init_params(int argc, char** argv, params &p)
     extract_option(args, "--chn-api", chn_str);
     p.chn_api = str_to_channel_impl(chn_str, "--chn-api");
 
+    p.pip_threads = extract_threads_list(args, "--pip-threads", p.pip_threads);
+
     p.ebn0_min  = extract_float_option(args, "--snr-min",  p.ebn0_min);
     p.ebn0_max  = extract_float_option(args, "--snr-max",  p.ebn0_max);
     p.ebn0_step = extract_float_option(args, "--snr-step", p.ebn0_step);
@@ -505,6 +586,10 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "# Simulation parameters: " << std::endl;
     tools::Header::print_parameters(params_list); // display the headers (= print the AFF3CT parameters on the screen)
     std::cout << "# * GPU ---------------------------------------------" << std::endl;
+    std::cout << "#    ** Pipeline threads / stage      = ";
+    for (size_t i = 0; i < p.pip_threads.size(); i++)
+        std::cout << (i ? "," : "") << p.pip_threads[i];
+    std::cout << std::endl;
     std::cout << "#    ** SNR min  (Eb/N0, dB)          = " << p.ebn0_min  << std::endl;
     std::cout << "#    ** SNR max  (Eb/N0, dB)          = " << p.ebn0_max  << std::endl;
     std::cout << "#    ** SNR step (Eb/N0, dB)          = " << p.ebn0_step << std::endl;
@@ -577,7 +662,7 @@ void init_utils(const params &p, const modules &m, utils &u)
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 0
             .add_first_task((*m.source)("generate")) //                                         first task of the stage
             .add_last_task((*m.source)("generate")) //                                          last  task of the stage
-            .set_n_threads(1)) //                                               run on a single thread (NO replication)
+            .set_n_threads(p.pip_threads[0])) //                                       --pip-threads[0]
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 0 <-> 1
             .set_buffer_size(3) //                                                          synchronization buffer size
@@ -586,7 +671,7 @@ void init_utils(const params &p, const modules &m, utils &u)
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 1
             .add_first_task((*m.encoder)("encode")) //                                          first task of the stage
             .add_last_task((*m.modem)("modulate"))  //                                      last  task of the stage
-            .set_n_threads(4)) //          can run on a multiple threads (with replication)
+            .set_n_threads(p.pip_threads[1])) //                                       --pip-threads[1]
         // ------------------------------------------------------------------------------------------------------------
         .configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 1 <-> 2
             .set_buffer_size(3) //                                                          synchronization buffer size
@@ -595,7 +680,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 2
            .add_first_task((*m.channel)(m.channel_task)) //                                          first task of the stage
            .add_last_task((*m.puncturer)("depuncture")) //                                      last  task of the stage
-           .set_n_threads(1)) //          can run on a multiple threads (with replication)
+           .set_n_threads(p.pip_threads[2])) //                                      --pip-threads[2]
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 2 <-> 3
        	    .set_buffer_size(3) //                                                          synchronization buffer size
@@ -604,7 +689,7 @@ void init_utils(const params &p, const modules &m, utils &u)
 		.add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 3
            .add_first_task((*m.decoder)("decode_siho_gpu")) //                                          first task of the stage
            .add_last_task((*m.decoder)("decode_siho_gpu")) //                                      last  task of the stage
-           .set_n_threads(1)) //          can run on a multiple threads (with replication)
+           .set_n_threads(p.pip_threads[3])) //                                      --pip-threads[3]
        // // ------------------------------------------------------------------------------------------------------------
        	.configure_interstage_synchro(spu::tools::Pipeline_builder::Synchro_builder() // ---------- INTER-STAGE 3 <-> 4
        	    .set_buffer_size(3) //                                                          synchronization buffer size
@@ -613,7 +698,7 @@ void init_utils(const params &p, const modules &m, utils &u)
         .add_stage(spu::tools::Pipeline_builder::Stage_builder() // ------------------------------------------- STAGE 4
             .set_first_tasks({&(*m.monitor)("check_errors"), //                            two first tasks of the stage
                               &(*m.sink)("send_count")}) //                  (and NO need for a last task in this case)
-            .set_n_threads(1)) //                                               run on a single thread (NO replication)
+            .set_n_threads(p.pip_threads[4])) //                                       --pip-threads[4]
         // ------------------------------------------------------------------------------------------------------------
         .build_ptr()); //               finally allocate and initialize a new pipeline from all the previous parameters
 
