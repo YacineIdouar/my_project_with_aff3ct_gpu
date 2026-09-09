@@ -182,6 +182,12 @@ static void print_gpu_options_help()
     std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
     std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
     std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
+    std::cout << "  --snr-min  <flt>  First Eb/N0 (dB) of the sweep                          [5.40]"
+              << std::endl;
+    std::cout << "  --snr-max  <flt>  Sweep runs while Eb/N0 < this value (dB)               [5.41]"
+              << std::endl;
+    std::cout << "  --snr-step <flt>  Eb/N0 increment (dB) between points                    [0.25]"
+              << std::endl;
     std::cout << "  --dec-stage-copy  Run the decoder stage's adaptors in copy mode instead   [off]"
               << std::endl;
     std::cout << "                    of no-copy, so its Y_N/V_K socket buffers stop rotating"      << std::endl;
@@ -234,10 +240,32 @@ static int extract_int_option(std::vector<char*>& args, const char* opt, const i
     }
 }
 
+static float extract_float_option(std::vector<char*>& args, const char* opt, const float def_value)
+{
+    std::string raw;
+    if (!extract_option(args, opt, raw)) return def_value;
+
+    try
+    {
+        size_t consumed = 0;
+        const float value = std::stof(raw, &consumed);
+        if (consumed != raw.size()) throw std::invalid_argument(raw);
+        return value;
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "(EE) '" << opt << "' expects a real number (got '" << raw << "')." << std::endl;
+        std::exit(1);
+    }
+}
+
 struct params
 {
     size_t n_threads = std::thread::hardware_concurrency();
-    float  ebn0      = 5.40f; // SNR value
+    float  ebn0      = 5.40f; // SNR value (single point, kept for reference)
+    float  ebn0_min  = 5.40f; // --snr-min:  first Eb/N0 of the sweep
+    float  ebn0_max  = 5.41f; // --snr-max:  loop runs while ebn0 < ebn0_max
+    float  ebn0_step = 0.25f; // --snr-step: Eb/N0 increment between points
     float  R;                  // code rate (R=K/N)
 
     bool dec_stage_copy = false; // --dec-stage-copy: copy adaptors around the decoder stage
@@ -366,24 +394,40 @@ int main(int argc, char** argv)
     for (auto &m : u.pipeline->get_modules<spu::tools::Interface_set_seed>())
         m->set_seed(prng());
 
-    // compute the current sigma for the channel noise
-    const auto esn0 = tools::ebn0_to_esn0(p.ebn0, p.R, p.modem->bps);
-    std::fill(sigma.begin(), sigma.end(), tools::esn0_to_sigma(esn0, p.modem->cpm_upf));
-
-    u.noise->set_values(sigma[0], p.ebn0, esn0);
-
-    // display the performance (BER and FER) in real time (in a separate thread)
+    // display the BER/FER legend once, before sweeping the SNRs
     u.terminal->legend();
-    u.terminal->start_temp_report();
 
-    // will automatically stop when `m.source->is_done()` will be `true` (end of input file) or if user press `Ctrl+c`
-    u.pipeline->exec([&m]() -> bool
-        {
-            return m.monitor->is_done();
-        });
+    // loop over the various SNRs (Eb/N0), simulating the BER/FER at each point
+    for (auto ebn0 = p.ebn0_min; ebn0 < p.ebn0_max; ebn0 += p.ebn0_step)
+    {
+        // compute the current sigma for the channel noise
+        const auto esn0 = tools::ebn0_to_esn0(ebn0, p.R, p.modem->bps);
+        std::fill(sigma.begin(), sigma.end(), tools::esn0_to_sigma(esn0, p.modem->cpm_upf));
 
-    // display the performance (BER and FER) in the terminal
-    u.terminal->final_report();
+        // set_values fires the recorded callbacks, propagating the new noise to every module
+        u.noise->set_values(sigma[0], ebn0, esn0);
+
+        // display the performance (BER and FER) in real time (in a separate thread)
+        u.terminal->start_temp_report();
+
+        // run the pipeline until the monitor has gathered enough errors (is_done()) for this SNR,
+        // the input file ends, or the user presses Ctrl+c
+        u.pipeline->exec([&m]() -> bool
+            {
+                return m.monitor->is_done();
+            });
+
+        // display the performance (BER and FER) for this SNR in the terminal
+        u.terminal->final_report();
+
+        // reset the monitor error counters before moving on to the next SNR
+        m.monitor->reset();
+
+        // stop the whole sweep if the user requested an interruption (Ctrl+c); otherwise the
+        // remaining SNRs would be skipped through instantly as exec() keeps returning on the signal
+        if (spu::tools::Signal_handler::is_sigint())
+            break;
+    }
 
     // display the statistics of the tasks (if enabled)
     auto stages = u.pipeline->get_stages();
@@ -418,6 +462,16 @@ void init_params(int argc, char** argv, params &p)
     extract_option(args, "--chn-api", chn_str);
     p.chn_api = str_to_channel_impl(chn_str, "--chn-api");
 
+    p.ebn0_min  = extract_float_option(args, "--snr-min",  p.ebn0_min);
+    p.ebn0_max  = extract_float_option(args, "--snr-max",  p.ebn0_max);
+    p.ebn0_step = extract_float_option(args, "--snr-step", p.ebn0_step);
+    if (p.ebn0_step <= 0.f)
+    {
+        std::cerr << "(EE) '--snr-step' must be strictly positive (got " << p.ebn0_step << ")."
+                  << std::endl;
+        std::exit(1);
+    }
+
     p.dec_stage_copy = extract_flag(args, "--dec-stage-copy");
 
     // No parsing for the dispatch mode, the decoder profiling or the Vulkan chain implementation:
@@ -451,6 +505,9 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "# Simulation parameters: " << std::endl;
     tools::Header::print_parameters(params_list); // display the headers (= print the AFF3CT parameters on the screen)
     std::cout << "# * GPU ---------------------------------------------" << std::endl;
+    std::cout << "#    ** SNR min  (Eb/N0, dB)          = " << p.ebn0_min  << std::endl;
+    std::cout << "#    ** SNR max  (Eb/N0, dB)          = " << p.ebn0_max  << std::endl;
+    std::cout << "#    ** SNR step (Eb/N0, dB)          = " << p.ebn0_step << std::endl;
     std::cout << "#    ** Device id                     = " << p.dev_id      << std::endl;
     std::cout << "#    ** Platform id                   = " << p.platform_id << std::endl;
     std::cout << "#    ** Decoder API                   = " << api_str
