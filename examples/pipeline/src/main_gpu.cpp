@@ -86,7 +86,7 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
 }
 
 // The channel module exists in three unrelated flavours: the AFF3CT factory one (CPU), the cuRAND
-// one declared in this example (CUDA), and the library-free one (Channel_AWGN_LLR_prng_gpu), whose
+// one declared in this example (CUDA), and Channel_AWGN_LLR_prng_gpu, whose
 // hand-written Philox4x32-10 generator is dispatched either through CUDA (CUDA_PRNG) or through
 // Vulkan (VULKAN_PRNG) -- one codelet per backend on a single task, exactly like the decoder, so
 // those two differ only by the compute_api set on the task. All flavours share their socket names,
@@ -101,6 +101,9 @@ static const char* channel_task_name(const channel_impl impl)
 
 // Which of Channel_AWGN_LLR_prng_gpu's codelets to run. Only meaningful for the *_PRNG values;
 // the cuRAND module registers a CUDA codelet and nothing else.
+//
+// Note CUDA_PRNG no longer means "Philox on CUDA": that module's CUDA codelet runs cuRAND, the same
+// function --chn-api CUDA selects. The two spellings differ only in which module wraps it.
 static spu::device_interface::compute_api channel_compute_api(const channel_impl impl)
 {
     switch (impl)
@@ -190,8 +193,8 @@ static void print_gpu_options_help()
     std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
               << std::endl;
     std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
-    std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
-    std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
+    std::cout << "                    CUDA and CUDA_PRNG both run cuRAND; HIP/SYCL/VULKAN_PRNG"  << std::endl;
+    std::cout << "                    run the hand-written Philox4x32-10 generator"              << std::endl;
     std::cout << "  --pip-threads <list>  Threads per pipeline stage             [1,4,1,1,1]"
               << std::endl;
     std::cout << "                    One comma-separated count per stage, in order:"                << std::endl;

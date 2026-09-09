@@ -8,7 +8,8 @@
 
 #include <aff3ct.hpp>
 #ifdef DECODER_CUDA
-#include "Cuda/Channel_AWGN_LLR_prng_cuda.hpp"
+// cuRAND, not the Philox handler this module's other backends use -- see the note on the class.
+#include "Cuda/Channel_AWGN_LLR_cuda.hpp"
 #endif
 #ifdef DECODER_HIP
 #include "Hip/Channel_AWGN_LLR_prng_hip.hpp"
@@ -42,15 +43,20 @@ namespace module
  * Philox4x32-10 generator of include/Rng/Philox4x32.hpp rather than from cuRAND.
  *
  * Like Decoder_LDPC_BP_flooding_gpu, this module registers one codelet per compiled backend on
- * its single task -- CUDA, HIP, SYCL and Vulkan (src/{cuda,hip,sycl,vulkan}/Channel_AWGN_LLR_
- * prng_*) -- and the caller picks between them with set_execution_device_info(), i.e. with
- * --chn-api. All four dispatch the same generator with the same geometry, so they produce
- * bit-identical noise.
+ * its single task -- CUDA, HIP, SYCL and Vulkan -- and the caller picks between them with
+ * set_execution_device_info(), i.e. with --chn-api.
  *
- * Because that generator is counter-based, this module owns no device-side RNG state: there
- * is no init_rand_state() step, set_seed() is a plain re-key, and set_n_frames() only has to
- * resize host buffers. It also drops the "N must be even" constraint of the cuRAND version,
- * whose kernel consumed curand_normal2() pairs unconditionally.
+ * The CUDA codelet is the exception: it runs cuRAND (Cuda_channel, src/cuda/Channel_AWGN_LLR_
+ * cuda.cu), the same function --chn-api CUDA selects through Channel_AWGN_LLR_gpu, rather than the
+ * Philox handler in src/cuda/Channel_AWGN_LLR_prng_cuda.cu. So CUDA and CUDA_PRNG now produce the
+ * same noise as each other, and the HIP/SYCL/Vulkan codelets -- still Philox -- produce noise
+ * bit-identical among themselves but no longer to CUDA. Cuda_channel_prng is still compiled; it is
+ * simply not reachable from --chn-api any more.
+ *
+ * That mixed sourcing is what shapes the lifecycle below. cuRAND keeps a device-side state buffer
+ * sized to the sample count, so the CUDA path needs init_rand_state() where the counter-based
+ * backends need nothing: set_seed() re-initialises it, set_n_frames() re-allocates it, and clone()
+ * gives each replica its own. The counter-based backends keep ignoring all three.
  */
 template <typename R = float>
 class Channel_AWGN_LLR_prng_gpu : public spu::module::Stateful, public spu::tools::Interface_set_seed
@@ -66,7 +72,7 @@ protected:
 	int seed;
 	std::vector<R> noised_data;  // vector of the noise applied to the signal
 #ifdef DECODER_CUDA
-	Cuda_channel_prng* cuda_handler;
+	Cuda_channel* cuda_handler; // cuRAND, unlike the counter-based handlers below
 #endif
 #ifdef DECODER_HIP
 	sp_hip::Hip_channel_prng* hip_handler;

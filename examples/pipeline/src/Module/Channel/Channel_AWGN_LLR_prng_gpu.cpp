@@ -37,8 +37,11 @@ Channel_AWGN_LLR_prng_gpu<R>
 	// the caller selects one with set_execution_device_info() (see --chn-api).
 #ifdef DECODER_CUDA
 	size_t p1_cuda_stream = this->create_gpu_stream(p1, spu::device_interface::compute_api::CUDA, this->dev_id, this->platform_id);
-	this->cuda_handler = new Cuda_channel_prng(this->dev_id);
-	this->cuda_handler->set_seed(this->seed);
+	// cuRAND rather than the Philox handler the other backends use: --chn-api CUDA and CUDA_PRNG run
+	// the same function. init_rand_state() allocates one RNG state per pair of samples and seeds it,
+	// which is the step the counter-based backends do not have.
+	this->cuda_handler = new Cuda_channel(this->dev_id);
+	this->cuda_handler->init_rand_state((int)this->total_size, this->seed);
 
 	this->register_codelet(p1, [p1s_CP, p1s_X_N, p1s_Y_N, p1_cuda_stream](Module &m, spu::runtime::Task &t, const size_t frame_id) -> int
 	{
@@ -127,8 +130,10 @@ Channel_AWGN_LLR_prng_gpu<R>* Channel_AWGN_LLR_prng_gpu<R>
 	// that runs the replicas would all draw the same sub-streams, so nothing may decode between
 	// clone() and the seeding loop.
 #ifdef DECODER_CUDA
-	m->cuda_handler = new Cuda_channel_prng(m->dev_id);
-	m->cuda_handler->set_seed(m->seed);
+	// Its own state buffer too, not just its own handler: two replicas drawing from one cuRAND state
+	// array would race on it.
+	m->cuda_handler = new Cuda_channel(m->dev_id);
+	m->cuda_handler->init_rand_state((int)m->total_size, m->seed);
 #endif
 #ifdef DECODER_HIP
 	m->hip_handler = new sp_hip::Hip_channel_prng(m->dev_id);
@@ -161,7 +166,9 @@ void Channel_AWGN_LLR_prng_gpu<R>
 	// Every compiled handler is re-keyed: which one actually runs is decided independently, by
 	// the execution device info set on the task.
 #ifdef DECODER_CUDA
-	this->cuda_handler->set_seed((unsigned long long)seed);
+	// cuRAND has no cheap re-key: seeding means re-running the initialisation kernel over the state
+	// buffer, which is what init_rand_state() does.
+	this->cuda_handler->init_rand_state((int)this->total_size, this->seed);
 #endif
 #ifdef DECODER_HIP
 	this->hip_handler->set_seed((unsigned long long)seed);
@@ -194,9 +201,14 @@ void Channel_AWGN_LLR_prng_gpu<R>
 		const auto new_noised_data_size = (old_noised_data_size / old_n_frames) * n_frames;
 		this->noised_data.resize(new_noised_data_size);
 
-		// Only the sample count changes: the counter-based generator has no device-side state
-		// to re-allocate, so there is nothing else to do here.
 		this->total_size = this->N * n_frames;
+
+		// The counter-based backends have no device-side state to resize. cuRAND does: its state
+		// buffer holds one entry per pair of samples, so it has to be re-allocated for the new
+		// sample count or the kernel would index past the end of it.
+#ifdef DECODER_CUDA
+		this->cuda_handler->init_rand_state((int)this->total_size, this->seed);
+#endif
 	}
 }
 
