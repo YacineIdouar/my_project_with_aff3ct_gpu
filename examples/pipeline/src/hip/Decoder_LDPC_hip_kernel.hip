@@ -15,7 +15,7 @@ are populated once during init and reused on every decode call.
 #include <stdint.h>
 #include <iostream>
 
-#include "hip/Decoder_LDPC_hip_kernel.hpp"
+#include "Hip/Decoder_LDPC_hip_kernel.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg1.hpp"
 #include "Module/Decoder_gpu/ldpc_tables_bg2.hpp"
 #include "Tools/Code/LDPC/Standard/5G/5G_base_graph.hpp"

@@ -59,22 +59,25 @@ static const int SAMPLES_PER_THREAD = 4; // one Philox4x32 draw feeds exactly fo
  * Thread `idx` owns the elements idx, idx+stride, idx+2*stride, idx+3*stride (stride = total
  * number of threads), so consecutive threads touch consecutive addresses on every access.
  * Its four samples all come from the single Philox draw keyed by (seed, counter, idx).
+ *
+ * The counter arrives through 'ctr' (ctr[0] low word, ctr[1] high word) rather than by value, so
+ * that every argument of this kernel is constant from one frame to the next -- see
+ * Hip_channel_prng in the header. The value the generator sees is unchanged.
  */
-__global__ void awgn_add_noise_philox_hip(const float* __restrict__ x,
-                                          float*       __restrict__ y,
-                                          int                       n,
-                                          float                     sigma,
-                                          uint32_t                  seed_lo,
-                                          uint32_t                  seed_hi,
-                                          uint32_t                  ctr_lo,
-                                          uint32_t                  ctr_hi)
+__global__ void awgn_add_noise_philox_hip(const float*    __restrict__ x,
+                                          float*          __restrict__ y,
+                                          int                          n,
+                                          float                        sigma,
+                                          uint32_t                     seed_lo,
+                                          uint32_t                     seed_hi,
+                                          const uint32_t* __restrict__ ctr)
 {
     const int idx    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
     if (idx >= n) return;
 
     float noise[SAMPLES_PER_THREAD];
-    philox_awgn_noise4((uint32_t)idx, ctr_lo, ctr_hi, seed_lo, seed_hi, noise);
+    philox_awgn_noise4((uint32_t)idx, ctr[0], ctr[1], seed_lo, seed_hi, noise);
 
 #pragma unroll
     for (int k = 0; k < SAMPLES_PER_THREAD; k++)
@@ -128,9 +131,28 @@ sp_hip::Hip_channel_prng::add_noise(const float* d_x,
     const int active_threads = (n_samples + SAMPLES_PER_THREAD - 1) / SAMPLES_PER_THREAD;
     const int blocks         = (active_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
+    // Two words on each side, allocated once. The device is set explicitly: this runs on a pipeline
+    // worker thread, not the one that built the handler, and the allocation must land on dev_id.
+    if (this->d_ctr == nullptr)
+    {
+        HIP_CHECK(hipSetDevice(this->dev_id));
+        HIP_CHECK(hipMalloc(&this->d_ctr, 2 * sizeof(uint32_t)));
+        HIP_CHECK(hipHostMalloc(&this->h_ctr, 2 * sizeof(uint32_t)));
+    }
+
     /* One counter value per launch, claimed atomically: this is the whole "state" of the
-       generator, and it lives on the host, so no device memory is touched between frames. */
+       generator. It reaches the kernel through d_ctr rather than as an argument, so the launch
+       arguments -- the graph cache key -- stay the same from frame to frame. */
     const unsigned long long counter = this->call_counter.fetch_add(1ull);
+
+    // Refresh the device copy on the task's stream, so stream order puts it before the kernel. That
+    // holds even when the launch below is deferred into a fused run (Device/Gpu_batch.hpp): the run
+    // is flushed on this same stream, after this copy. Overwriting h_ctr here is safe because the
+    // previous frame's copy completed before its synchronize() -- or its run's flush -- returned.
+    this->h_ctr[0] = (uint32_t)(counter & 0xFFFFFFFFull);
+    this->h_ctr[1] = (uint32_t)(counter >> 32);
+    HIP_CHECK(hipMemcpyAsync(this->d_ctr, this->h_ctr, 2 * sizeof(uint32_t), hipMemcpyHostToDevice,
+                             native_stream));
 
     // --dec-profile / SPU_LDPC_PROFILE. The timing launch_profiled() records covers the same
     // stream as the kernel, so profiling changes what is measured, not where the work runs. No lock:
@@ -139,14 +161,14 @@ sp_hip::Hip_channel_prng::add_noise(const float* d_x,
     {
         executor->launch(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0,
                          d_x, d_y, n_samples, sigma, this->seed_lo, this->seed_hi,
-                         (uint32_t)(counter & 0xFFFFFFFFull), (uint32_t)(counter >> 32));
+                         (const uint32_t*)this->d_ctr);
         executor->synchronize(native_stream);
         return;
     }
 
     executor->launch_profiled(awgn_add_noise_philox_hip, blocks, THREADS_PER_BLOCK, 0,
                                     d_x, d_y, n_samples, sigma, this->seed_lo, this->seed_hi,
-                                    (uint32_t)(counter & 0xFFFFFFFFull), (uint32_t)(counter >> 32));
+                                    (const uint32_t*)this->d_ctr);
     executor->synchronize(native_stream);
 
     // After the sync: the events only hold a time once the kernel completed. Clearing is mandatory,

@@ -24,8 +24,11 @@ namespace sp_hip
  * and SYCL backends -- so for identical (n, sigma, seed, counter) and the same launch geometry
  * every backend produces bit-identical noise.
  *
- * Counter-based, therefore stateless on the device: no buffer to allocate, no initialisation
- * kernel, and set_seed() is free.
+ * Counter-based, so no RNG state lives on the device and set_seed() is free. The one device
+ * allocation is two words holding the per-frame counter: passing the counter as a kernel argument
+ * instead would change the argument bytes every frame, and those bytes are the key StreamPU caches
+ * a captured HIP graph under -- every frame would miss, capture and keep a new graph. Read through
+ * a fixed pointer, the arguments are constant and the graph is captured once.
  */
 class Hip_channel_prng
 {
@@ -43,6 +46,13 @@ private:
 	// Atomic because clone() shares the handler between module copies, which the pipeline may
 	// run concurrently on separate streams.
 	std::atomic<unsigned long long> call_counter;
+
+	// The counter the kernel reads, as two words: 'd_ctr' on the device, passed to every launch as
+	// the same pointer, and 'h_ctr' a pinned host staging copy it is refreshed from before each
+	// launch. Pinned so the asynchronous copy reads stable memory. Allocated on the first add_noise(),
+	// on dev_id.
+	uint32_t* d_ctr = nullptr;
+	uint32_t* h_ctr = nullptr;
 
 public:
 	explicit Hip_channel_prng(int device_id);
