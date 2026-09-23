@@ -76,11 +76,30 @@ endif()
 
 
 if(DECODER_HIP)
+    # The AMD GPU architecture(s) the HIP kernels are compiled for -- required, as StreamPU requires
+    # its own HIP_ARCH. Left unset, the compiler embeds code for its default target only (gfx906), and
+    # on any other GPU every launch fails with "invalid device function": the runtime finds no code
+    # object matching the device. Detection at configure time is no substitute, since on a cluster the
+    # machine that builds is often not the one with the GPU. Use the value `rocminfo | grep gfx`
+    # prints on the machine that runs, e.g. -DHIP_ARCH=gfx90a, or -DHIP_ARCH="gfx90a;gfx942" to cover
+    # several. It should match the HIP_ARCH StreamPU was built with.
+    set(HIP_ARCH "" CACHE STRING "AMD GPU architecture(s) for the HIP kernels, e.g. gfx90a or \"gfx90a;gfx942\"")
+    if(HIP_ARCH STREQUAL "")
+        message(FATAL_ERROR "pipeline - DECODER_HIP needs -DHIP_ARCH=<gfx...>, the architecture of the GPU "
+                            "the binary will run on (see `rocminfo | grep gfx` on that machine).")
+    endif()
+
     file(GLOB_RECURSE hip_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/hip/*)
+    # Stated rather than inferred from the .hip extension, as StreamPU does for its own HIP sources:
+    # HIP_ARCHITECTURES below only reaches sources compiled as HIP.
+    set_source_files_properties(${hip_source_files} PROPERTIES LANGUAGE HIP)
     add_library(obj-hip OBJECT ${hip_source_files})
     target_include_directories(obj-hip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # On the target itself, not through CMAKE_HIP_ARCHITECTURES: this target is created before
+    # project() enables HIP further down, so it would never pick up the variable.
     set_target_properties(obj-hip PROPERTIES
         POSITION_INDEPENDENT_CODE ON
+        HIP_ARCHITECTURES "${HIP_ARCH}"
     )
     target_link_libraries(obj-hip PUBLIC aff3ct::aff3ct-static-lib)
     list(APPEND PROJECT_LANGUAGES HIP)
