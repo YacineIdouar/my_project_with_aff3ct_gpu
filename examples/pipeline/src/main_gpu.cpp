@@ -393,7 +393,9 @@ struct modules
     // channel_gpu_prng serves both CUDA_PRNG and VULKAN_PRNG -- they differ only by the codelet
     // the task is told to execute.
     std::unique_ptr<     module::Channel<>>                     channel_cpu;
+#ifdef DECODER_CUDA // cuRAND module, only built with CUDA (see Channel_AWGN_LLR_gpu.cpp)
 	std::unique_ptr<     module::Channel_AWGN_LLR_gpu<float>>   channel_gpu;
+#endif
 	std::unique_ptr<module::Channel_AWGN_LLR_prng_gpu<float>>   channel_gpu_prng;
                     spu::module::Module*                        channel = nullptr;
                          std::string                            channel_task;
@@ -628,12 +630,17 @@ void init_modules(const params &p, modules &m)
     m.source  = std::unique_ptr<spu::module::Source      <>>(p.source ->build());
     m.codec   = std::unique_ptr<     tools ::Codec_SIHO  <>>(p.codec  ->build());
     m.modem   = std::unique_ptr<     module::Modem       <>>(p.modem  ->build());
+#ifdef DECODER_CUDA
+	// Unreachable without CUDA anyway -- str_to_channel_impl() only accepts "CUDA" when it is compiled
+	// in -- but the module itself only exists then, so naming it has to be guarded too.
 	if (p.chn_api == channel_impl::CUDA)
 	{
 		m.channel_gpu = std::unique_ptr<module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel     = m.channel_gpu.get();
 	}
-	else if (p.chn_api != channel_impl::CPU) // any of the *_PRNG flavours: one module, one codelet each
+	else
+#endif
+	if (p.chn_api != channel_impl::CPU) // any of the *_PRNG flavours: one module, one codelet each
 	{
 		m.channel_gpu_prng = std::unique_ptr<module::Channel_AWGN_LLR_prng_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_prng_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel          = m.channel_gpu_prng.get();

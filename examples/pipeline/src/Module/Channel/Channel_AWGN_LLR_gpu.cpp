@@ -3,6 +3,14 @@
 
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 
+// cuRAND-only module: everything below calls Cuda_channel, whose definitions live in
+// src/cuda/Channel_AWGN_LLR_cuda.cu and are therefore only compiled into obj-cuda. This file sits in
+// obj-module, which every build compiles, so without this guard a build with DECODER_CUDA off still
+// instantiates Channel_AWGN_LLR_gpu<float> (the explicit instantiation at the bottom) and fails to
+// link on the missing Cuda_channel symbols. The mains only reference this module under the same
+// guard, and --chn-api CUDA is only accepted when CUDA is compiled in.
+#ifdef DECODER_CUDA
+
 using namespace aff3ct;
 using namespace aff3ct::module;
 
@@ -124,4 +132,6 @@ void Channel_AWGN_LLR_gpu<R>
 // ==================================================================================== explicit template instantiation
 template class aff3ct::module::Channel_AWGN_LLR_gpu<float>;
 //template class aff3ct::module::Channel_AWGN_LLR_gpu<double>;
+
+#endif // DECODER_CUDA
 // ==================================================================================== explicit template instantiation
