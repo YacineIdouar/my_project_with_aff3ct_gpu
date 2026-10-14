@@ -330,3 +330,19 @@ if(DECODER_VULKAN)
     target_link_libraries(pipeline_gpu PRIVATE Vulkan::Vulkan)
     target_link_libraries(pipeline_5st PRIVATE Vulkan::Vulkan)
 endif()
+
+# ---------------------------------------------------------------------------
+# Check of the batched CUDA channel and LDPC decoder against the original CUDA modules
+# ---------------------------------------------------------------------------
+if(DECODER_CUDA)
+    add_executable(pipeline_tidepu_check
+        ${link-objects}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/main_tidepu_check.cpp
+    )
+    target_include_directories(pipeline_tidepu_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(pipeline_tidepu_check PRIVATE
+        aff3ct::aff3ct-static-lib
+        Threads::Threads
+    )
+    target_compile_definitions(pipeline_tidepu_check PRIVATE DECODER_CUDA)
+endif()

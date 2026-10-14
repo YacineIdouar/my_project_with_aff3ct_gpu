@@ -15,6 +15,10 @@
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_prng_gpu.hpp"
+#ifdef DECODER_CUDA // batched CUDA modules: all the frames of a firing in one launch
+#include "Module/Channel/Channel_AWGN_LLR_curand_batched.hpp"
+#include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_cuda_batched.hpp"
+#endif
 using namespace aff3ct;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +38,7 @@ static std::string compiled_decoder_apis()
     auto add = [&list](const char* name) { list += list.empty() ? name : std::string(", ") + name; };
 #ifdef DECODER_CUDA
     add("CUDA");
+    add("CUDA_BATCHED");
 #endif
 #ifdef DECODER_HIP
     add("HIP");
@@ -89,7 +94,7 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
 // those two differ only by the compute_api set on the task. All flavours share their socket names,
 // and all the GPU ones share their task name, but the CPU one does not, so the choice has to be
 // carried around at bind time.
-enum class channel_impl { CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG };
+enum class channel_impl { CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG };
 
 static const char* channel_task_name(const channel_impl impl)
 {
@@ -117,6 +122,7 @@ static channel_impl str_to_channel_impl(const std::string& s, const char* opt)
 #ifdef DECODER_CUDA
     if (s == "CUDA")           return channel_impl::CUDA;
     if (s == "CUDA_PRNG")      return channel_impl::CUDA_PRNG;
+    if (s == "CUDA_BATCHED")   return channel_impl::CUDA_BATCHED;
 #endif
 #ifdef DECODER_HIP
     if (s == "HIP_PRNG")       return channel_impl::HIP_PRNG;
@@ -161,11 +167,17 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "  --plt-id  <int>   Platform id (only SYCL indexes devices by platform)    [0]"
               << std::endl;
+    std::cout << "  --n-frames <int>  Frames per firing, for every module                    [1]"
+              << std::endl;
+    std::cout << "                    The CUDA_BATCHED channel and decoder process all of them" << std::endl;
+    std::cout << "                    in one launch; the others call their kernel per frame"   << std::endl;
     std::cout << "  --dec-api <api>   Backend running the decoder task, one of {"
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
     std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
               << std::endl;
-    std::cout << "                    {CPU, CUDA, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG}" << std::endl;
+    std::cout << "                    {CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, SYCL_PRNG," << std::endl;
+    std::cout << "                     VULKAN_PRNG}; CUDA_BATCHED runs cuRAND on all the frames"  << std::endl;
+    std::cout << "                    of a firing in one launch"                                << std::endl;
     std::cout << "                    CUDA uses cuRAND; every <API>_PRNG runs the same hand-"    << std::endl;
     std::cout << "                    written Philox4x32-10 generator on that backend"           << std::endl;
     std::cout << "  --snr-min  <flt>  First Eb/N0 (dB) of the sweep                          [1.00]"
@@ -227,6 +239,8 @@ struct params
 
     int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
     int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
+    int n_frames    = 1;       // --n-frames: frames per firing, for every module
+    bool dec_batched = false;  // --dec-api CUDA_BATCHED: batched CUDA decoder
     int dec_n_ite   = 10;      // --dec-ite: decoder iterations (read back from the codec factory)
     spu::device_interface::compute_api dec_api = // --dec-api: backend the decoder task executes on
         spu::device_interface::compute_api::NATIVE;
@@ -262,7 +276,11 @@ struct modules
     std::unique_ptr<spu::module::Sink<>>         sink;
     std::unique_ptr<     tools ::Codec_SIHO<>>   codec;
                          module::Encoder<>*      encoder;
-                         module::Decoder_LDPC_BP_flooding_gpu<float, int>* decoder;
+                    spu::module::Module*        decoder = nullptr; // the decoder built (see --dec-api)
+#ifdef DECODER_CUDA // batched CUDA modules (--chn-api / --dec-api CUDA_BATCHED)
+    std::unique_ptr<module::Channel_AWGN_LLR_curand_batched>       channel_gpu_batched;
+    std::unique_ptr<module::Decoder_LDPC_BP_flooding_cuda_batched> decoder_gpu_batched;
+#endif
 						 //module::Decoder_SIHO<>* decoder;
 	std::unique_ptr<     module::Puncturer_5G<>> puncturer;
 };
@@ -309,7 +327,7 @@ int main(int argc, char** argv)
     (*m.monitor)["check_errors::V"       ] = (*m.decoder)["decode_siho_gpu::V_K"      ];
     (*m.sink   )[  "send_count::in_count"] = (*m.source )[   "generate::out_count"];
     (*m.sink   )[  "send_count::in_data" ] = (*m.decoder)["decode_siho_gpu::V_K"      ];
-    std::vector<float> sigma(1);
+    std::vector<float> sigma(p.n_frames); // one sigma per frame of a firing
     (*m.channel)[ m.channel_task + "::CP" ] = sigma;
     (*m.modem  )[  "demodulate::CP"      ] = sigma;
 
@@ -380,6 +398,13 @@ int main(int argc, char** argv)
         std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
         spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
     }
+#ifdef DECODER_CUDA
+    // launch timings of the batched CUDA modules, one entry per firing (nothing when they are not used)
+    for (auto* chn : u.pipeline->get_modules<module::Channel_AWGN_LLR_curand_batched>())
+        chn->dump_profiling(std::cout);
+    for (auto* dec : u.pipeline->get_modules<module::Decoder_LDPC_BP_flooding_cuda_batched>())
+        dec->dump_profiling(std::cout);
+#endif
     std::cout << "#" << std::endl << "# End of the simulation" << std::endl;
 
     return 0;
@@ -391,10 +416,20 @@ void init_params(int argc, char** argv, params &p)
     std::vector<char*> args(argv, argv + argc);
     p.dev_id      = extract_int_option(args, "--dev-id", p.dev_id);
     p.platform_id = extract_int_option(args, "--plt-id", p.platform_id);
+    p.n_frames    = extract_int_option(args, "--n-frames", p.n_frames);
+    if (p.n_frames < 1)
+    {
+        std::cerr << "(EE) '--n-frames' must be at least 1." << std::endl;
+        std::exit(1);
+    }
 
     std::string api_str = default_decoder_api();
     extract_option(args, "--dec-api", api_str);
-    p.dec_api = str_to_compute_api(api_str, "--dec-api");
+#ifdef DECODER_CUDA
+    // CUDA_BATCHED: the batched decoder module, which runs on CUDA
+    p.dec_batched = (api_str == "CUDA_BATCHED");
+#endif
+    p.dec_api = str_to_compute_api(p.dec_batched ? "CUDA" : api_str, "--dec-api");
 
     std::string chn_str = "CUDA";
     extract_option(args, "--chn-api", chn_str);
@@ -439,6 +474,7 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "# * GPU ---------------------------------------------" << std::endl;
     std::cout << "#    ** Device id                     = " << p.dev_id      << std::endl;
     std::cout << "#    ** Platform id                   = " << p.platform_id << std::endl;
+    std::cout << "#    ** Frames per firing             = " << p.n_frames    << std::endl;
     std::cout << "#    ** Decoder API                   = " << api_str
               << " (compiled: " << compiled_decoder_apis() << ")" << std::endl;
     std::cout << "#    ** Channel API                   = " << chn_str << std::endl;
@@ -464,7 +500,12 @@ void init_modules(const params &p, modules &m)
 #ifdef DECODER_CUDA
 	// Unreachable without CUDA anyway -- str_to_channel_impl() only accepts "CUDA" when it is compiled
 	// in -- but the module itself only exists then, so naming it has to be guarded too.
-	if (p.chn_api == channel_impl::CUDA)
+	if (p.chn_api == channel_impl::CUDA_BATCHED)
+	{
+		m.channel_gpu_batched.reset(new aff3ct::module::Channel_AWGN_LLR_curand_batched(p.channel.get()->N, p.channel.get()->seed));
+		m.channel             = m.channel_gpu_batched.get();
+	}
+	else if (p.chn_api == channel_impl::CUDA)
 	{
 		m.channel_gpu = std::unique_ptr<module::Channel_AWGN_LLR_gpu<float>>(new aff3ct::module::Channel_AWGN_LLR_gpu<float> (p.channel.get()->N, p.channel.get()->seed, p.dev_id, p.platform_id));
 		m.channel     = m.channel_gpu.get();
@@ -485,11 +526,25 @@ void init_modules(const params &p, modules &m)
     m.monitor = std::unique_ptr<     module::Monitor_BFER<>>(p.monitor->build());
     m.sink    = std::unique_ptr<spu::module::Sink        <>>(p.sink   ->build());
     m.encoder = &m.codec->get_encoder();
+#ifdef DECODER_CUDA
+    if (p.dec_batched)
+    {
+        m.decoder_gpu_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite));
+        m.decoder = m.decoder_gpu_batched.get();
+    }
+    else
+#endif
     m.decoder = new aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dev_id, p.platform_id);
 	//m.decoder = &m.codec->get_decoder_siho();
 	// Building the puncturer
 	std::vector<bool> pct_pattern;
     m.puncturer = std::unique_ptr<module::Puncturer_5G<>> (new module::Puncturer_5G <int, float> (p.puncturer.get()->K, p.puncturer.get()->N,  p.codec->enc.get()->N_cw,  pct_pattern));
+
+    // --n-frames: set before the sockets are bound and the pipeline is built, which are sized from it
+    for (spu::module::Module* mod : std::vector<spu::module::Module*>{ m.source.get(), m.encoder, m.puncturer.get(),
+                                                                         m.modem.get(), m.channel, m.decoder,
+                                                                         m.monitor.get(), m.sink.get() })
+        mod->set_n_frames((size_t)p.n_frames);
 
     // prevent the monitor to stop the pipeline
     //m.monitor->disable_is_done(true);
