@@ -33,7 +33,8 @@ out_buf;
 // which this counter must, or successive frames would draw the same noise -- would therefore miss
 // that cache on every single frame and pay a full descriptor-set + command-buffer re-record. Read
 // through a descriptor instead, the recording stays valid for the whole run and the host only
-// writes eight bytes into a mapped buffer before each submit.
+// writes eight bytes into a mapped buffer before each submit. (The batched channel,
+// Vulkan_channel_batched, advances it on the device instead: see philox_counter_step.comp.)
 layout(set = 0, binding = 2) readonly buffer CtrBuf
 {
     uint word[2]; // [0] = counter low 32 bits, [1] = high

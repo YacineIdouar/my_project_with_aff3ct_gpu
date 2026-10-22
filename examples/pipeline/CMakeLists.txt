@@ -198,7 +198,10 @@ if(DECODER_VULKAN)
     set(VULKAN_EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake")
     set(VULKAN_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan/Shaders")
     set(VULKAN_SHADER_NAMES ldpc_clip_channel ldpc_update_cn ldpc_update_vn ldpc_hard_decision
-                            awgn_philox)
+                            awgn_philox
+                            # batched modules (Decoder_LDPC_BP_flooding_vulkan_batched, Channel_AWGN_LLR_prng_vulkan_batched)
+                            ldpc_clip_channel_batched ldpc_update_cn_batched ldpc_update_vn_batched
+                            ldpc_hard_decision_batched philox_counter_step)
     # .glsl files are not compiled on their own: they are #include'd by the .comp shaders above
     # (GL_GOOGLE_include_directive, resolved by glslc -I). Listed here only so that editing one
     # re-triggers the shaders that include it.
@@ -332,9 +335,10 @@ if(DECODER_VULKAN)
 endif()
 
 # ---------------------------------------------------------------------------
-# Check of the batched CUDA channel and LDPC decoder against the original CUDA modules
+# Check of the batched channels and LDPC decoders against the original modules, for each backend that has them
+# (CUDA, Vulkan)
 # ---------------------------------------------------------------------------
-if(DECODER_CUDA)
+if(DECODER_CUDA OR DECODER_VULKAN)
     add_executable(pipeline_tidepu_check
         ${link-objects}
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main_tidepu_check.cpp
@@ -344,5 +348,22 @@ if(DECODER_CUDA)
         aff3ct::aff3ct-static-lib
         Threads::Threads
     )
-    target_compile_definitions(pipeline_tidepu_check PRIVATE DECODER_CUDA)
+    # Every enabled backend, as for the other executables: the original modules it includes have one member per
+    # compiled backend, so their layout has to match the one obj-module was compiled with.
+    foreach(backend DECODER_CUDA DECODER_HIP DECODER_SYCL DECODER_VULKAN)
+        if(${backend})
+            target_compile_definitions(pipeline_tidepu_check PRIVATE ${backend})
+        endif()
+    endforeach()
+    if(DECODER_SYCL)
+        target_link_libraries(pipeline_tidepu_check PRIVATE obj-sycl)
+        if(SYCL_COMPILER STREQUAL "oneapi")
+            target_link_options(pipeline_tidepu_check PRIVATE -fsycl -fsycl-targets=${SYCL_BACKEND})
+        elseif(SYCL_COMPILER STREQUAL "acpp")
+            target_link_options(pipeline_tidepu_check PRIVATE --acpp-targets=generic)
+        endif()
+    endif()
+    if(DECODER_VULKAN)
+        target_link_libraries(pipeline_tidepu_check PRIVATE Vulkan::Vulkan)
+    endif()
 endif()

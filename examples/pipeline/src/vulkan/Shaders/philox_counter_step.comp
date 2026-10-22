@@ -1,0 +1,33 @@
+#version 450
+/*
+Advances the Philox counter that awgn_philox.comp reads, on the device: the second dispatch of the chain of
+sp_vulkan::Vulkan_channel_batched (src/vulkan/Channel_AWGN_LLR_prng_vulkan_batched.cpp), after the barrier that
+follows the noise pass, so the next firing draws the next sub-stream.
+
+Vulkan_channel_prng advances the same counter from the host instead, writing it before each submit; done here, the
+counter needs no wait between two firings, and the chain's key stays the same for the whole run.
+*/
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer CtrBuf
+{
+    uint word[2]; // [0] = counter low 32 bits, [1] = high
+}
+ctr_buf;
+
+// Only there because a pipeline layout cannot declare an empty push constant range (the executor always declares one).
+layout(push_constant) uniform PushConstants
+{
+    uint step;
+}
+pc;
+
+void
+main()
+{
+    uint carry;
+    uint lo = uaddCarry(ctr_buf.word[0], pc.step, carry);
+    ctr_buf.word[1] += carry;
+    ctr_buf.word[0] = lo;
+}

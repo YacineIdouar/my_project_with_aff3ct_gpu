@@ -1,0 +1,39 @@
+#version 450
+/*
+GLSL port of clip_channel_kernel in ../../cuda/Decoder_LDPC_cuda_batched_kernel.cu: ldpc_clip_channel.comp with the
+frame as work group y. Vulkan has no pointer to offset, so the frame strides are push constants and every index is
+offset by 'frame * stride' instead.
+*/
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InBuf
+{
+    float data[];
+}
+in_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf
+{
+    float data[];
+}
+out_buf;
+
+layout(push_constant) uniform PushConstants
+{
+    uint n;
+    uint in_stride;
+    uint out_stride;
+}
+pc;
+
+const float MAX_CHANNEL_LLR = 128.0;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= pc.n) return;
+    uint f = gl_WorkGroupID.y;
+    out_buf.data[f * pc.out_stride + tid] = clamp(in_buf.data[f * pc.in_stride + tid], -MAX_CHANNEL_LLR, MAX_CHANNEL_LLR);
+}
