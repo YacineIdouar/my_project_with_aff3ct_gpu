@@ -18,8 +18,11 @@ namespace module
  * with TidePU's Generic module: same kernels and arithmetic, so the same decoded bits.
  *
  * Same task and sockets ('decode_siho_gpu': 'Y_N', 'CWD', 'V_K'). The frames of a firing are decoded independently,
- * so the implementation is registered with 'gpu_batched()': one chain of kernels decodes the n_f frames, each kernel
- * with the frame as its grid y dimension and the frame strides given by the call ('call::frame_elmts()').
+ * so the implementation is registered with 'gpu_batched()': one chain of kernels decodes the n_f frames, with the
+ * frame strides given by the call ('call::frame_elmts()'). Two variants, with the same decoded bits:
+ * - batched (default): each kernel has the frame as its grid y dimension (n_f times the threads of one frame);
+ * - frame loop ('frame_loop' = true): each kernel has the grid of one frame, and each thread loops over the n_f
+ *   frames. It pays off when one frame already fills the GPU.
  *
  * The base graph tables and the work buffers of n_f frames are device state of each replica ('per_device'): created
  * by on_device(), re-sized by on_n_frames().
@@ -31,10 +34,15 @@ class Decoder_LDPC_BP_flooding_cuda_batched final : public spu::module::Generic<
     const int N_LDPC; // LLRs per frame at the input (size of 'Y_N', the depunctured codeword)
     const int N_cw;   // transmitted length: selects the 5G base graph with K
     const int n_ite;
+    const bool frame_loop; // frame-loop kernels instead of the frames on grid y
     spu::module::per_device<sp_cuda::Cuda_decoder_batched> dev;
 
   public:
-    Decoder_LDPC_BP_flooding_cuda_batched(const int K, const int N_LDPC, const int N_cw, const int n_ite);
+    Decoder_LDPC_BP_flooding_cuda_batched(const int K,
+                                          const int N_LDPC,
+                                          const int N_cw,
+                                          const int n_ite,
+                                          const bool frame_loop = false);
 
     void on_device(const api exec_api, const int device_id, const int platform_id) override;
     void on_n_frames(const size_t n_frames) override;

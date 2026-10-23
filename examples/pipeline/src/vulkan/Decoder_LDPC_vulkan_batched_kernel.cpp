@@ -1,8 +1,10 @@
 /*
 Decoder_LDPC_vulkan_batched_kernel.cpp
 --------------------------------------
-Vulkan part of Decoder_LDPC_BP_flooding_vulkan_batched: the dispatch chain of Decoder_LDPC_vulkan_kernel.cpp with the
-frame as work group y (Shaders/ldpc_*_batched.comp), as Decoder_LDPC_cuda_batched_kernel.cu does with grid y on CUDA.
+Vulkan part of Decoder_LDPC_BP_flooding_vulkan_batched: the dispatch chain of Decoder_LDPC_vulkan_kernel.cpp for the
+n_f frames of a firing, in two variants, as Decoder_LDPC_cuda_batched_kernel.cu on CUDA:
+- batched (default): the frame is work group y (Shaders/ldpc_*_batched.comp);
+- frame loop: the work groups of one frame, each invocation looping over the n_f frames (Shaders/ldpc_*_loop.comp).
 Each shader offsets its indices by 'frame * stride' and is otherwise the per-frame one: same arithmetic, same
 operation order, so the same decoded bits.
 
@@ -33,6 +35,10 @@ per frame.
 #include "ldpc_update_cn_batched_spv.hpp"     // generated at build time from Shaders/ldpc_update_cn_batched.comp
 #include "ldpc_update_vn_batched_spv.hpp"     // generated at build time from Shaders/ldpc_update_vn_batched.comp
 #include "ldpc_hard_decision_batched_spv.hpp" // generated at build time from Shaders/ldpc_hard_decision_batched.comp
+#include "ldpc_clip_channel_loop_spv.hpp"      // generated at build time from Shaders/ldpc_clip_channel_loop.comp
+#include "ldpc_update_cn_loop_spv.hpp"         // generated at build time from Shaders/ldpc_update_cn_loop.comp
+#include "ldpc_update_vn_loop_spv.hpp"         // generated at build time from Shaders/ldpc_update_vn_loop.comp
+#include "ldpc_hard_decision_loop_spv.hpp"     // generated at build time from Shaders/ldpc_hard_decision_loop.comp
 
 using aff3ct::tools::Std_5G_base_graph;
 using spu::device_interface::compute_api;
@@ -60,6 +66,28 @@ struct VnPushConstants
 struct HardDecisionPushConstants
 {
     uint32_t block_length, total_stride, bits_stride;
+};
+
+// Layouts of the push_constant blocks of Shaders/ldpc_*_loop.comp: the batched ones, plus the number of frames.
+struct ClipLoopPushConstants
+{
+    ClipPushConstants base;
+    uint32_t n_frames;
+};
+struct CnLoopPushConstants
+{
+    CnPushConstants base;
+    uint32_t n_frames;
+};
+struct VnLoopPushConstants
+{
+    VnPushConstants base;
+    uint32_t n_frames;
+};
+struct HardDecisionLoopPushConstants
+{
+    HardDecisionPushConstants base;
+    uint32_t n_frames;
 };
 
 inline uint32_t
@@ -119,9 +147,14 @@ deallocate(const int dev_id, const void* ptr)
 }
 }
 
-sp_vulkan::Vulkan_decoder_batched::Vulkan_decoder_batched(const int dev_id, const int K, const int N, const size_t n_frames)
+sp_vulkan::Vulkan_decoder_batched::Vulkan_decoder_batched(const int dev_id,
+                                                        const int K,
+                                                        const int N,
+                                                        const size_t n_frames,
+                                                        const bool frame_loop)
   : dev_id(dev_id)
   , bg(aff3ct::tools::build_5G_base_graph(K, N))
+  , frame_loop(frame_loop)
 {
     upload_tables(this->bg, this->dev_id);
     this->reserve(n_frames);
@@ -181,6 +214,14 @@ sp_vulkan::Vulkan_decoder_batched::decode(const float* llr_in,
     static const auto hd_words =
       spu::sp_vulkan::spirv_words(pipeline_vulkan_shaders::ldpc_hard_decision_batched_spv,
                                   pipeline_vulkan_shaders::ldpc_hard_decision_batched_spv_size);
+    static const auto clip_loop_words = spu::sp_vulkan::spirv_words(
+      pipeline_vulkan_shaders::ldpc_clip_channel_loop_spv, pipeline_vulkan_shaders::ldpc_clip_channel_loop_spv_size);
+    static const auto cn_loop_words = spu::sp_vulkan::spirv_words(pipeline_vulkan_shaders::ldpc_update_cn_loop_spv,
+                                                                  pipeline_vulkan_shaders::ldpc_update_cn_loop_spv_size);
+    static const auto vn_loop_words = spu::sp_vulkan::spirv_words(pipeline_vulkan_shaders::ldpc_update_vn_loop_spv,
+                                                                  pipeline_vulkan_shaders::ldpc_update_vn_loop_spv_size);
+    static const auto hd_loop_words = spu::sp_vulkan::spirv_words(
+      pipeline_vulkan_shaders::ldpc_hard_decision_loop_spv, pipeline_vulkan_shaders::ldpc_hard_decision_loop_spv_size);
 
     if (n_frames > this->n_frames) this->reserve(n_frames);
     this->launched = true;
@@ -209,45 +250,78 @@ sp_vulkan::Vulkan_decoder_batched::decode(const float* llr_in,
     // after at least one iteration the totals, otherwise the channel LLRs, as 'llr_total' in the CUDA chain
     const HardDecisionPushConstants hd_pc{ K, n_ite > 0 ? num_vns : in_stride, bits_stride };
 
+    // the frame-loop shaders take the same constants, plus the number of frames
+    const ClipLoopPushConstants clip_loop_pc{ clip_pc, n_frames };
+    const CnLoopPushConstants cn_loop_pc_first{ cn_pc_first, n_frames };
+    const CnLoopPushConstants cn_loop_pc_rest{ cn_pc_rest, n_frames };
+    const VnLoopPushConstants vn_loop_pc{ vn_pc, n_frames };
+    const HardDecisionLoopPushConstants hd_loop_pc{ hd_pc, n_frames };
+
     std::vector<spu::executor::VULKAN_dispatch_desc> chain;
     chain.reserve(2 + 2 * (size_t)n_ite);
 
+    // One dispatch of the chain, in the variant of this decoder: batched (the frames as work group y, 'batched_*') or
+    // frame loop (the work groups of one frame, 'loop_*').
+    const bool loop = this->frame_loop;
+    auto add = [&](const std::vector<uint32_t>& batched_words,
+                   const std::vector<uint32_t>& loop_words,
+                   std::vector<VkBuffer> buffers,
+                   const uint32_t groups_x,
+                   const void* batched_pc,
+                   const size_t batched_pc_size,
+                   const void* loop_pc,
+                   const size_t loop_pc_size)
+    {
+        const auto& words = loop ? loop_words : batched_words;
+        chain.push_back({ words.data(),
+                          words.size() * sizeof(uint32_t),
+                          std::move(buffers),
+                          groups_x,
+                          loop ? 1u : n_frames,
+                          loop ? loop_pc : batched_pc,
+                          loop ? loop_pc_size : batched_pc_size });
+    };
+
     // kept as in the original chain: iteration 0 reads the raw channel LLRs, not the clipped ones
-    chain.push_back({ clip_words.data(),
-                      clip_words.size() * sizeof(uint32_t),
-                      { in_buf, total_buf },
-                      blocks_for(num_vns, ELEMENT_BLOCK),
-                      n_frames,
-                      &clip_pc,
-                      sizeof(clip_pc) });
+    add(clip_words,
+        clip_loop_words,
+        { in_buf, total_buf },
+        blocks_for(num_vns, ELEMENT_BLOCK),
+        &clip_pc,
+        sizeof(clip_pc),
+        &clip_loop_pc,
+        sizeof(clip_loop_pc));
 
     VkBuffer llr_total = in_buf;
     for (uint32_t iter = 0; iter < n_ite; ++iter)
     {
-        chain.push_back({ cn_words.data(),
-                          cn_words.size() * sizeof(uint32_t),
-                          { llr_total, msg_buf, cn_buf, cn_degree_buf },
-                          blocks_for(num_cns, NODE_KERNEL_BLOCK),
-                          n_frames,
-                          iter == 0 ? &cn_pc_first : &cn_pc_rest,
-                          sizeof(CnPushConstants) });
-        chain.push_back({ vn_words.data(),
-                          vn_words.size() * sizeof(uint32_t),
-                          { msg_buf, in_buf, total_buf, vn_buf, vn_degree_buf },
-                          blocks_for(num_vns, NODE_KERNEL_BLOCK),
-                          n_frames,
-                          &vn_pc,
-                          sizeof(vn_pc) });
+        add(cn_words,
+            cn_loop_words,
+            { llr_total, msg_buf, cn_buf, cn_degree_buf },
+            blocks_for(num_cns, NODE_KERNEL_BLOCK),
+            iter == 0 ? &cn_pc_first : &cn_pc_rest,
+            sizeof(CnPushConstants),
+            iter == 0 ? &cn_loop_pc_first : &cn_loop_pc_rest,
+            sizeof(CnLoopPushConstants));
+        add(vn_words,
+            vn_loop_words,
+            { msg_buf, in_buf, total_buf, vn_buf, vn_degree_buf },
+            blocks_for(num_vns, NODE_KERNEL_BLOCK),
+            &vn_pc,
+            sizeof(vn_pc),
+            &vn_loop_pc,
+            sizeof(vn_loop_pc));
         llr_total = total_buf;
     }
 
-    chain.push_back({ hd_words.data(),
-                      hd_words.size() * sizeof(uint32_t),
-                      { llr_total, bits_buf },
-                      blocks_for(K, ELEMENT_BLOCK),
-                      n_frames,
-                      &hd_pc,
-                      sizeof(hd_pc) });
+    add(hd_words,
+        hd_loop_words,
+        { llr_total, bits_buf },
+        blocks_for(K, ELEMENT_BLOCK),
+        &hd_pc,
+        sizeof(hd_pc),
+        &hd_loop_pc,
+        sizeof(hd_loop_pc));
 
     auto* vulkan_stream = static_cast<spu::sp_vulkan::VulkanStream*>(stream);
     spu::executor::VULKAN_executor exec(vulkan_stream->device());

@@ -7,6 +7,8 @@
 //   same seed, same counter sequence, same dispatch, so the same noisy frames, at 1 and 4 frames per firing;
 //   aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched (n_f frames per chain) vs Decoder_LDPC_BP_flooding_gpu
 //   (one frame per chain, VULKAN): same decoded bits for every frame.
+// - Both backends: the frame-loop variant of the batched decoder (the threads of one frame, each looping over the n_f
+//   frames) vs the same original decoder: same decoded bits for every frame.
 //
 // Usage: pipeline_tidepu_check [K] [N] [n_ite]   (5G LDPC, default K=1000 N=2000 n_ite=10)
 
@@ -228,7 +230,8 @@ test_decoder(const std::string& what,
     }
 }
 
-// The batched modules of one backend against the original modules on that backend.
+// The batched modules of one backend, and the frame-loop variant of its batched decoder, against the original modules
+// on that backend.
 void
 test_backend(const std::string& name,
              const int K,
@@ -237,11 +240,15 @@ test_backend(const std::string& name,
              const make_channel& ref_chn,
              const make_channel& new_chn,
              const make_decoder& ref_dec,
-             const make_decoder& new_dec)
+             const make_decoder& new_dec,
+             const make_decoder& loop_dec)
 {
     test_channel(name, N, ref_chn, new_chn);
     for (const float sigma : { 0.75f, 1.f, 1.3f, 2.f })
-        test_decoder(name, K, N, n_ite, sigma, ref_dec, new_dec);
+    {
+        test_decoder(name + ", batched", K, N, n_ite, sigma, ref_dec, new_dec);
+        test_decoder(name + ", frame loop", K, N, n_ite, sigma, ref_dec, loop_dec);
+    }
 }
 }
 
@@ -276,6 +283,12 @@ main(int argc, char** argv)
       {
           return use_api(std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched>(K, N_LDPC, N, n_ite),
                          api::CUDA);
+      },
+      [&]()
+      {
+          return use_api(
+            std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched>(K, N_LDPC, N, n_ite, true),
+            api::CUDA);
       });
 #endif
 #ifdef DECODER_VULKAN
@@ -301,6 +314,12 @@ main(int argc, char** argv)
       {
           return use_api(std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched>(K, N_LDPC, N, n_ite),
                          api::VULKAN);
+      },
+      [&]()
+      {
+          return use_api(
+            std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched>(K, N_LDPC, N, n_ite, 0, true),
+            api::VULKAN);
       });
 #endif
 

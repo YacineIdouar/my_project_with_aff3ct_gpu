@@ -15,6 +15,10 @@ namespace sp_vulkan
  * frames (the Vulkan decoder of Decoder_LDPC_vulkan_kernel.hpp, with the frames of a firing decoded in one chain, as
  * sp_cuda::Cuda_decoder_batched does on CUDA).
  *
+ * Two variants of the same chain, with the same decoded bits:
+ * - batched (default): each dispatch has the frames as work group y, so n_f times the invocations of one frame;
+ * - frame loop: each dispatch has the work groups of one frame, and each invocation loops over the n_f frames.
+ *
  * Unlike the per-frame Vulkan decoder, the base graph belongs to the object rather than to a file-scope global, so two
  * decoders of different codes can coexist.
  *
@@ -25,6 +29,7 @@ class Vulkan_decoder_batched
   private:
     int dev_id;
     aff3ct::tools::Std_5G_base_graph bg; // with the device copies of its tables: cn, vn, cn_degree, vn_degree
+    bool frame_loop;                     // frame-loop shaders instead of the frames as work group y
     float* llr_msg = nullptr;            // n_f frames of num_rows * num_cols * Zc messages
     float* llr_total = nullptr;          // n_f frames of num_cols * Zc totals
     size_t n_frames = 0;                 // frames the buffers hold
@@ -36,12 +41,14 @@ class Vulkan_decoder_batched
 
   public:
     // Base graph of the (K, N) 5G code ('N': transmitted length), uploaded to device 'dev_id'.
-    Vulkan_decoder_batched(int dev_id, int K, int N, size_t n_frames);
+    Vulkan_decoder_batched(int dev_id, int K, int N, size_t n_frames, bool frame_loop = false);
     ~Vulkan_decoder_batched();
     Vulkan_decoder_batched(const Vulkan_decoder_batched&) = delete;
     Vulkan_decoder_batched& operator=(const Vulkan_decoder_batched&) = delete;
 
     const aff3ct::tools::Std_5G_base_graph& get_base_graph() const { return this->bg; }
+
+    bool is_frame_loop() const { return this->frame_loop; }
 
     // Work buffers for at least 'n_frames' frames (only re-allocated to grow, see 'retired').
     void reserve(size_t n_frames);

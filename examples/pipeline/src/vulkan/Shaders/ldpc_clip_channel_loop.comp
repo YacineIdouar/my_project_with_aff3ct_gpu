@@ -1,0 +1,41 @@
+#version 450
+/*
+Frame-loop variant of ldpc_clip_channel_batched.comp (clip_channel_loop_kernel in
+../../cuda/Decoder_LDPC_cuda_batched_kernel.cu): dispatched with the work groups of one frame, each invocation clips its
+element in the 'n_frames' frames, one after the other. Same arithmetic, so the same values.
+*/
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InBuf
+{
+    float data[];
+}
+in_buf;
+
+layout(set = 0, binding = 1) writeonly buffer OutBuf
+{
+    float data[];
+}
+out_buf;
+
+layout(push_constant) uniform PushConstants
+{
+    uint n;
+    uint in_stride;
+    uint out_stride;
+    uint n_frames;
+}
+pc;
+
+const float MAX_CHANNEL_LLR = 128.0;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= pc.n) return;
+    for (uint f = 0u; f < pc.n_frames; f++)
+        out_buf.data[f * pc.out_stride + tid] =
+          clamp(in_buf.data[f * pc.in_stride + tid], -MAX_CHANNEL_LLR, MAX_CHANNEL_LLR);
+}

@@ -19,8 +19,11 @@ namespace module
  * and arithmetic, so the same decoded bits.
  *
  * Same task and sockets ('decode_siho_gpu': 'Y_N', 'CWD', 'V_K'). The frames of a firing are decoded independently,
- * so the implementation is registered with 'gpu_batched()': one chain of dispatches decodes the n_f frames, each
- * dispatch with the frame as its work group y and the frame strides given by the call ('call::frame_elmts()').
+ * so the implementation is registered with 'gpu_batched()': one chain of dispatches decodes the n_f frames, with the
+ * frame strides given by the call ('call::frame_elmts()'). Two variants, with the same decoded bits:
+ * - batched (default): each dispatch has the frame as its work group y (n_f times the invocations of one frame);
+ * - frame loop ('frame_loop' = true): each dispatch has the work groups of one frame, and each invocation loops over
+ *   the n_f frames. It pays off when one frame already fills the GPU.
  *
  * The base graph tables and the work buffers of n_f frames are device state of each replica ('per_device'), grown by
  * on_n_frames(). As in Channel_AWGN_LLR_prng_vulkan_batched, and for the same reason (StreamPU's Vulkan allocator is
@@ -35,7 +38,8 @@ class Decoder_LDPC_BP_flooding_vulkan_batched final
     const int N_LDPC; // LLRs per frame at the input (size of 'Y_N', the depunctured codeword)
     const int N_cw;   // transmitted length: selects the 5G base graph with K
     const int n_ite;
-    int device_id; // the Vulkan device 'dev' is built for
+    int device_id;         // the Vulkan device 'dev' is built for
+    const bool frame_loop; // frame-loop shaders instead of the frames as work group y
     spu::module::per_device<sp_vulkan::Vulkan_decoder_batched> dev;
 
     void build(const int device_id);
@@ -45,7 +49,8 @@ class Decoder_LDPC_BP_flooding_vulkan_batched final
                                             const int N_LDPC,
                                             const int N_cw,
                                             const int n_ite,
-                                            const int device_id = 0);
+                                            const int device_id = 0,
+                                            const bool frame_loop = false);
 
     void on_clone(const size_t replica_id) override;
     void on_device(const api exec_api, const int device_id, const int platform_id) override;

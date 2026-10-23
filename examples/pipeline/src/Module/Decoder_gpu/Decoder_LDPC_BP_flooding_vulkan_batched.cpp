@@ -14,13 +14,15 @@ Decoder_LDPC_BP_flooding_vulkan_batched::Decoder_LDPC_BP_flooding_vulkan_batched
                                                                                  const int N_LDPC,
                                                                                  const int N_cw,
                                                                                  const int n_ite,
-                                                                                 const int device_id)
-  : Generic("Decoder_LDPC_BP_flooding_vulkan_batched")
+                                                                                 const int device_id,
+                                                                                 const bool frame_loop)
+  : Generic(frame_loop ? "Decoder_LDPC_BP_flooding_vulkan_loop" : "Decoder_LDPC_BP_flooding_vulkan_batched")
   , K(K)
   , N_LDPC(N_LDPC)
   , N_cw(N_cw)
   , n_ite(n_ite)
   , device_id(device_id)
+  , frame_loop(frame_loop)
 {
     task("decode_siho_gpu", in<float>("Y_N", N_LDPC), out<int8_t>("CWD", 1), out<int>("V_K", K))
       .gpu_batched(api::VULKAN, &Decoder_LDPC_BP_flooding_vulkan_batched::decode_vulkan);
@@ -50,7 +52,8 @@ void
 Decoder_LDPC_BP_flooding_vulkan_batched::build(const int device_id)
 {
     this->device_id = device_id;
-    this->dev = std::make_unique<sp_vulkan::Vulkan_decoder_batched>(device_id, this->K, this->N_cw, this->get_n_frames());
+    this->dev = std::make_unique<sp_vulkan::Vulkan_decoder_batched>(
+      device_id, this->K, this->N_cw, this->get_n_frames(), this->frame_loop);
 
     const auto& bg = this->dev->get_base_graph();
     if (bg.num_cols * bg.Zc > (uint32_t)this->N_LDPC)

@@ -1,0 +1,117 @@
+#version 450
+/*
+Frame-loop variant of ldpc_update_cn_batched.comp (update_cn_loop_kernel in ../../cuda/Decoder_LDPC_cuda_batched_kernel.cu):
+dispatched with the work groups of one frame, each invocation updates its check node in the 'n_frames' frames, one
+after the other. The row, the lane, the degree and the table row are computed once, before the loop; the body is the
+batched one, so the same messages.
+*/
+
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) readonly buffer LlrTotalBuf
+{
+    float data[];
+}
+llr_total;
+
+layout(set = 0, binding = 1) buffer LlrMsgBuf
+{
+    float data[];
+}
+llr_msg;
+
+layout(set = 0, binding = 2) readonly buffer BgCnBuf
+{
+    uint data[];
+}
+bg_cn;
+
+layout(set = 0, binding = 3) readonly buffer BgCnDegreeBuf
+{
+    uint data[];
+}
+bg_cn_degree;
+
+layout(push_constant) uniform PushConstants
+{
+    uint Zc;
+    uint cn_stride;
+    uint num_rows;
+    uint first_iter;
+    uint total_stride; // frame stride of 'llr_total'
+    uint msg_stride;   // frame stride of 'llr_msg'
+    uint n_frames;
+}
+pc;
+
+const float OMS_OFFSET = 0.5;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    uint i = tid % pc.Zc;
+    uint idx_row = tid / pc.Zc;
+
+    if (idx_row >= pc.num_rows) return;
+
+    uint cn_degree = bg_cn_degree.data[idx_row];
+    uint check_base = idx_row * pc.cn_stride;
+
+    for (uint f = 0u; f < pc.n_frames; f++)
+    {
+        uint total_base = f * pc.total_stride;
+        uint msg_base = f * pc.msg_stride;
+
+        float min_1 = 1e38;
+        float min_2 = 1e38;
+        int idx_min = -1;
+        int node_sign = 1;
+        uint msg_signs = 0u;
+
+        for (uint ii = 0u; ii < cn_degree; ii++)
+        {
+            uint cn = bg_cn.data[check_base + ii];
+            uint idx_col = cn & 0xffffu;
+            uint s = cn >> 16;
+            uint msg_offset = idx_row + idx_col * pc.num_rows;
+            uint msg_idx = msg_offset * pc.Zc + i;
+
+            float t = llr_total.data[total_base + idx_col * pc.Zc + (i + s) % pc.Zc];
+
+            if (pc.first_iter == 0u) t -= llr_msg.data[msg_base + msg_idx];
+
+            int sign = (t >= 0.0) ? 1 : -1;
+            node_sign *= sign;
+            if (t < 0.0) msg_signs |= (1u << ii);
+
+            float t_abs = abs(t);
+            if (t_abs < min_1)
+            {
+                min_2 = min_1;
+                min_1 = t_abs;
+                idx_min = int(msg_idx);
+            }
+            else if (t_abs < min_2)
+            {
+                min_2 = t_abs;
+            }
+        }
+
+        min_1 = max(0.0, min_1 - OMS_OFFSET);
+        min_2 = max(0.0, min_2 - OMS_OFFSET);
+
+        for (uint ii = 0u; ii < cn_degree; ii++)
+        {
+            uint cn = bg_cn.data[check_base + ii];
+            uint idx_col = cn & 0xffffu;
+            uint msg_offset = idx_row + idx_col * pc.num_rows;
+            uint msg_idx = msg_offset * pc.Zc + i;
+
+            float min_val = (int(msg_idx) == idx_min) ? min_2 : min_1;
+            int msg_sign = (((msg_signs >> ii) & 0x1u) != 0u) ? -1 : 1;
+
+            llr_msg.data[msg_base + msg_idx] = min_val * float(node_sign * msg_sign);
+        }
+    }
+}

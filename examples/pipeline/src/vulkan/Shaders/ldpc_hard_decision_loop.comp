@@ -1,0 +1,38 @@
+#version 450
+/*
+Frame-loop variant of ldpc_hard_decision_batched.comp (hard_decision_loop_kernel in
+../../cuda/Decoder_LDPC_cuda_batched_kernel.cu): dispatched with the work groups of one frame, each invocation decides its
+bit in the 'n_frames' frames, one after the other.
+*/
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer LlrTotalBuf
+{
+    float data[];
+}
+llr_total;
+
+layout(set = 0, binding = 1) writeonly buffer BitsBuf
+{
+    int data[];
+}
+bits;
+
+layout(push_constant) uniform PushConstants
+{
+    uint block_length;
+    uint total_stride; // frame stride of 'llr_total'
+    uint bits_stride;  // frame stride of 'bits' (the socket's)
+    uint n_frames;
+}
+pc;
+
+void
+main()
+{
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= pc.block_length) return;
+    for (uint f = 0u; f < pc.n_frames; f++)
+        bits.data[f * pc.bits_stride + tid] = (llr_total.data[f * pc.total_stride + tid] < 0.0) ? 1 : 0;
+}

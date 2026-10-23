@@ -201,7 +201,10 @@ if(DECODER_VULKAN)
                             awgn_philox
                             # batched modules (Decoder_LDPC_BP_flooding_vulkan_batched, Channel_AWGN_LLR_prng_vulkan_batched)
                             ldpc_clip_channel_batched ldpc_update_cn_batched ldpc_update_vn_batched
-                            ldpc_hard_decision_batched philox_counter_step)
+                            ldpc_hard_decision_batched philox_counter_step
+                            # frame-loop variant of the batched decoder (--dec-api VULKAN_LOOP)
+                            ldpc_clip_channel_loop ldpc_update_cn_loop ldpc_update_vn_loop
+                            ldpc_hard_decision_loop)
     # .glsl files are not compiled on their own: they are #include'd by the .comp shaders above
     # (GL_GOOGLE_include_directive, resolved by glslc -I). Listed here only so that editing one
     # re-triggers the shaders that include it.

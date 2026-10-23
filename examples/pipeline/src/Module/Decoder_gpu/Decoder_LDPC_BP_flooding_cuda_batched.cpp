@@ -13,12 +13,14 @@ using namespace aff3ct::module;
 Decoder_LDPC_BP_flooding_cuda_batched::Decoder_LDPC_BP_flooding_cuda_batched(const int K,
                                                                              const int N_LDPC,
                                                                              const int N_cw,
-                                                                             const int n_ite)
-  : Generic("Decoder_LDPC_BP_flooding_cuda_batched")
+                                                                             const int n_ite,
+                                                                             const bool frame_loop)
+  : Generic(frame_loop ? "Decoder_LDPC_BP_flooding_cuda_loop" : "Decoder_LDPC_BP_flooding_cuda_batched")
   , K(K)
   , N_LDPC(N_LDPC)
   , N_cw(N_cw)
   , n_ite(n_ite)
+  , frame_loop(frame_loop)
 {
     task("decode_siho_gpu", in<float>("Y_N", N_LDPC), out<int8_t>("CWD", 1), out<int>("V_K", K))
       .gpu_batched(api::CUDA, &Decoder_LDPC_BP_flooding_cuda_batched::decode_cuda);
@@ -31,7 +33,8 @@ void
 Decoder_LDPC_BP_flooding_cuda_batched::on_device(const api exec_api, const int device_id, const int /*platform_id*/)
 {
     if (exec_api != api::CUDA) return;
-    this->dev = std::make_unique<sp_cuda::Cuda_decoder_batched>(device_id, this->K, this->N_cw, this->get_n_frames());
+    this->dev = std::make_unique<sp_cuda::Cuda_decoder_batched>(
+      device_id, this->K, this->N_cw, this->get_n_frames(), this->frame_loop);
 
     const auto& bg = this->dev->get_base_graph();
     if (bg.num_cols * bg.Zc > (uint32_t)this->N_LDPC)

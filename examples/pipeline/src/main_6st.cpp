@@ -46,6 +46,7 @@ static std::string compiled_decoder_apis()
 #ifdef DECODER_CUDA
     add("CUDA");
     add("CUDA_BATCHED");
+    add("CUDA_LOOP");
 #endif
 #ifdef DECODER_HIP
     add("HIP");
@@ -56,6 +57,7 @@ static std::string compiled_decoder_apis()
 #ifdef DECODER_VULKAN
     add("VULKAN");
     add("VULKAN_BATCHED");
+    add("VULKAN_LOOP");
 #endif
     return list.empty() ? std::string("<none>") : list;
 }
@@ -210,6 +212,8 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "                    The *_BATCHED channels and decoders process all of them" << std::endl;
     std::cout << "                    in one launch; the others call their kernel per frame"   << std::endl;
+    std::cout << "                    The *_LOOP decoders too, with the threads of one frame"   << std::endl;
+    std::cout << "                    each looping over the frames of the launch"               << std::endl;
     std::cout << "  --dec-api <api>   Backend running the decoder task, one of {"
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
     std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
@@ -395,6 +399,7 @@ struct params
     int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
     int n_frames    = 1;       // --n-frames: frames per firing, for every module
     bool dec_batched = false;  // --dec-api <API>_BATCHED: batched decoder module (of dec_api: CUDA or VULKAN)
+    bool dec_frame_loop = false; // --dec-api <API>_LOOP: the batched decoder module, frame-loop variant
     int dec_n_ite   = 10;      // --dec-ite: decoder iterations (read back from the codec factory)
     spu::device_interface::compute_api dec_api = // --dec-api: backend the decoder task executes on
         spu::device_interface::compute_api::NATIVE;
@@ -595,12 +600,15 @@ void init_params(int argc, char** argv, params &p)
 
     std::string api_str = default_decoder_api();
     extract_option(args, "--dec-api", api_str);
-    // <API>_BATCHED: the batched decoder module of that API, which runs on it
+    // <API>_BATCHED: the batched decoder module of that API, which runs on it; <API>_LOOP: the same module, with its
+    // frame-loop kernels (the threads of one frame, each looping over the frames of the launch)
 #ifdef DECODER_CUDA
     if (api_str == "CUDA_BATCHED")   { p.dec_batched = true; p.dec_api = spu::device_interface::compute_api::CUDA;   }
+    if (api_str == "CUDA_LOOP")      { p.dec_batched = true; p.dec_frame_loop = true; p.dec_api = spu::device_interface::compute_api::CUDA; }
 #endif
 #ifdef DECODER_VULKAN
     if (api_str == "VULKAN_BATCHED") { p.dec_batched = true; p.dec_api = spu::device_interface::compute_api::VULKAN; }
+    if (api_str == "VULKAN_LOOP")    { p.dec_batched = true; p.dec_frame_loop = true; p.dec_api = spu::device_interface::compute_api::VULKAN; }
 #endif
     if (!p.dec_batched) p.dec_api = str_to_compute_api(api_str, "--dec-api");
 
@@ -733,7 +741,7 @@ void init_modules(const params &p, modules &m)
 #ifdef DECODER_CUDA
     if (p.dec_batched && p.dec_api == spu::device_interface::compute_api::CUDA)
     {
-        m.decoder_gpu_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite));
+        m.decoder_gpu_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dec_frame_loop));
         m.decoder = m.decoder_gpu_batched.get();
     }
     else
@@ -741,7 +749,7 @@ void init_modules(const params &p, modules &m)
 #ifdef DECODER_VULKAN
     if (p.dec_batched && p.dec_api == spu::device_interface::compute_api::VULKAN)
     {
-        m.decoder_vk_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dev_id));
+        m.decoder_vk_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dev_id, p.dec_frame_loop));
         m.decoder = m.decoder_vk_batched.get();
     }
     else
