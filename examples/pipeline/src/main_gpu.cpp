@@ -235,6 +235,10 @@ static void print_gpu_options_help()
               << std::endl;
     std::cout << "                    of no-copy, so its Y_N/V_K socket buffers stop rotating"      << std::endl;
     std::cout << "                    from one frame to the next (see init_utils())"                << std::endl;
+    std::cout << "  --no-stats        Do not collect nor print the per-task statistics        [off]"
+              << std::endl;
+    std::cout << "                    (with them, StreamPU keeps the GPU tasks synchronous and"     << std::endl;
+    std::cout << "                    unfused: needed to measure SPU_GPU_ASYNC or SPU_GPU_FUSION)"  << std::endl;
     std::cout << std::endl;
 
     // These select *how* the work reaches the device rather than what runs, and they are set from
@@ -375,6 +379,7 @@ struct params
     float  R;                  // code rate (R=K/N)
 
     bool dec_stage_copy = false; // --dec-stage-copy: copy adaptors around the decoder stage
+    bool stats          = true;  // --no-stats: no per-task statistics (they keep the GPU tasks synchronous and unfused)
 
 #ifdef DECODER_VULKAN
     // SPU_LDPC_VULKAN_CHAIN: which of the two Vulkan decoder implementations decoders are built from.
@@ -549,12 +554,15 @@ int main(int argc, char** argv)
     }
 
     // display the statistics of the tasks (if enabled)
-    auto stages = u.pipeline->get_stages();
-    for (size_t s = 0; s < stages.size(); s++)
+    if (p.stats)
     {
-        const int n_threads = stages[s]->get_n_threads();
-        std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
-        spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
+        auto stages = u.pipeline->get_stages();
+        for (size_t s = 0; s < stages.size(); s++)
+        {
+            const int n_threads = stages[s]->get_n_threads();
+            std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
+            spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
+        }
     }
     // After the stage statistics, and after pipeline->exec() returned: the counters it reads are
     // written by the decoding threads without synchronisation, so they are only stable once those
@@ -624,6 +632,7 @@ void init_params(int argc, char** argv, params &p)
     }
 
     p.dec_stage_copy = extract_flag(args, "--dec-stage-copy");
+    p.stats          = !extract_flag(args, "--no-stats");
 
     // No parsing for the dispatch mode, the decoder profiling or the Vulkan chain implementation:
     // all three are read from the environment where 'p' was initialised, and the environment is the
@@ -671,6 +680,7 @@ void init_params(int argc, char** argv, params &p)
     std::cout << "#    ** Channel API                   = " << chn_str << std::endl;
     std::cout << "#    ** Decoder stage adaptors        = " << (p.dec_stage_copy ? "copy" : "no-copy")
               << std::endl;
+    std::cout << "#    ** Task statistics               = " << (p.stats ? "on" : "off") << std::endl;
 #ifdef DECODER_VULKAN
     if (p.dec_api == spu::device_interface::compute_api::VULKAN && !p.dec_batched) // per-frame decoder only
     {
@@ -868,7 +878,7 @@ void init_utils(const params &p, const modules &m, utils &u)
     {
         tsk->set_debug      (false); // disable the debug mode
         tsk->set_debug_limit(16   ); // display only the 16 first bits if the debug mode is enabled
-        tsk->set_stats      (true ); // enable the statistics
+        tsk->set_stats      (p.stats); // enable the statistics, unless '--no-stats'
 
         // enable the fast mode (= disable the useless verifs in the tasks) if there is no debug and stats modes
         if (!tsk->is_debug() && !tsk->is_stats())

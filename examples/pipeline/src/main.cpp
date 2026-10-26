@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <vector>
 #include <string>
@@ -18,6 +19,7 @@ struct params
     size_t n_threads = std::thread::hardware_concurrency();
     float  ebn0      = 2.40f; // SNR value
     float  R;                  // code rate (R=K/N)
+    bool   stats     = true;  // --no-stats: no per-task statistics (they keep the GPU tasks synchronous and unfused)
 
     std::unique_ptr<factory::Source          > source;
     std::unique_ptr<factory::Codec_LDPC      > codec;
@@ -126,12 +128,15 @@ int main(int argc, char** argv)
     u.terminal->final_report();
 
     // display the statistics of the tasks (if enabled)
-    auto stages = u.pipeline->get_stages();
-    for (size_t s = 0; s < stages.size(); s++)
+    if (p.stats)
     {
-        const int n_threads = stages[s]->get_n_threads();
-        std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
-        spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
+        auto stages = u.pipeline->get_stages();
+        for (size_t s = 0; s < stages.size(); s++)
+        {
+            const int n_threads = stages[s]->get_n_threads();
+            std::cout << "#" << std::endl << "# Pipeline stage " << s << " (" << n_threads << " thread(s)): " << std::endl;
+            spu::tools::Stats::show(stages[s]->get_tasks_per_types(), true);
+        }
     }
     std::cout << "#" << std::endl << "# End of the simulation" << std::endl;
 
@@ -153,11 +158,25 @@ void init_params(int argc, char** argv, params &p)
                                                    p.channel .get(), p.monitor.get(), p.sink .get(),
                                                    p.terminal.get()                                  };
 
+    // '--no-stats' is not a factory argument: it is taken out before the AFF3CT parser, which would report it as
+    // unknown
+    std::vector<char*> args(argv, argv + argc);
+    for (size_t i = 1; i < args.size(); i++)
+        if (std::strcmp(args[i], "--no-stats") == 0)
+        {
+            p.stats = false;
+            args.erase(args.begin() + i);
+            break;
+        }
+
     // parse the command for the given parameters and fill them
-    tools::Command_parser cp(argc, argv, params_list, true);
+    tools::Command_parser cp((int)args.size(), args.data(), params_list, true);
     if (cp.parsing_failed())
     {
         cp.print_help    ();
+        std::cout << "  --no-stats  Do not collect nor print the per-task statistics (with them, StreamPU keeps"
+                  << std::endl;
+        std::cout << "              the GPU tasks synchronous and unfused)" << std::endl;
         cp.print_warnings();
         cp.print_errors  ();
         std::exit(1);
@@ -165,6 +184,7 @@ void init_params(int argc, char** argv, params &p)
 
     std::cout << "# Simulation parameters: " << std::endl;
     tools::Header::print_parameters(params_list); // display the headers (= print the AFF3CT parameters on the screen)
+    std::cout << "# Task statistics: " << (p.stats ? "on" : "off") << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
@@ -240,7 +260,7 @@ void init_utils(const params &p, const modules &m, utils &u)
     {
         tsk->set_debug      (false); // disable the debug mode
         tsk->set_debug_limit(16   ); // display only the 16 first bits if the debug mode is enabled
-        tsk->set_stats      (true ); // enable the statistics
+        tsk->set_stats      (p.stats); // enable the statistics, unless '--no-stats'
 
         // enable the fast mode (= disable the useless verifs in the tasks) if there is no debug and stats modes
         if (!tsk->is_debug() && !tsk->is_stats())
