@@ -23,7 +23,7 @@ export ROOT=$(pwd)   # the root of my_project_with_aff3ct_gpu
 | CUDA | CUDA toolkit (`nvcc`) |
 | Vulkan | Vulkan loader and headers, plus `glslc` to compile the shaders |
 | SYCL (oneAPI) | Intel LLVM `clang++` with `-fsycl` (here `/opt/llvm/build/bin/clang++`) |
-| HIP | ROCm |
+| HIP | ROCm, with hipRAND (the `hiprand` and `rocrand` packages) for the batched HIP channel |
 
 - Optional: `hwloc` (thread pinning in StreamPU, `-DSPU_LINK_HWLOC=ON`).
 
@@ -46,8 +46,8 @@ StreamPU and for the project.
 
 ## 1. StreamPU / TidePU
 
-The batched modules (`--chn-api CUDA_BATCHED`, `--dec-api CUDA_BATCHED`) are written
-with StreamPU's Generic module. Check out a TidePU branch that has it:
+The batched modules (`--chn-api` / `--dec-api` `CUDA_BATCHED`, `HIP_BATCHED` and
+`VULKAN_BATCHED`) are written with StreamPU's Generic module. Check out a TidePU branch that has it:
 `tidepu_generic_module`, or any branch it has been merged into.
 
 ```bash
@@ -143,7 +143,7 @@ Backend options:
 | Vulkan | `-DDECODER_VULKAN=ON` |
 | SYCL (oneAPI) | `-DDECODER_SYCL=ON -DSYCL_COMPILER=oneapi -DSYCL_BACKEND=<targets>` |
 | SYCL (AdaptiveCpp) | `-DDECODER_SYCL=ON -DSYCL_COMPILER=acpp` |
-| HIP | `-DDECODER_HIP=ON -DHIP_ARCH=<gfx...>` |
+| HIP | `-DDECODER_HIP=ON -DHIP_ARCH=<gfx...>` (needs hipRAND; add its prefix, e.g. `/opt/rocm`, to `CMAKE_PREFIX_PATH` if CMake does not find it) |
 
 Two rules:
 
@@ -163,7 +163,7 @@ The executables are written to `build/bin/`:
 | `pipeline_cpu` | `src/main.cpp` | |
 | `pipeline_gpu` | `src/main_gpu.cpp` | takes the GPU options of section 4 |
 | `pipeline_6st` | `src/main_6st.cpp` | same as `pipeline_gpu`, with the channel in a stage of its own (6 stages, so `--pip-threads` takes 6 counts) |
-| `pipeline_tidepu_check` | `src/main_tidepu_check.cpp` | checks the batched CUDA channel and decoder against the original CUDA modules; only built with `DECODER_CUDA` |
+| `pipeline_tidepu_check` | `src/main_tidepu_check.cpp` | checks the batched CUDA, HIP and Vulkan channels and decoders against the original modules of their backend (the hipRAND channel has no original to match: it is checked against a second instance of itself and on the noise statistics); only built with `DECODER_CUDA`, `DECODER_HIP` or `DECODER_VULKAN` |
 
 ## 4. Running
 
@@ -190,13 +190,20 @@ A simulation with the batched CUDA channel and decoder, 8 frames per firing:
                    --chn-api CUDA_BATCHED --dec-api CUDA_BATCHED --n-frames 8
 ```
 
+The same with the batched HIP modules (hipRAND channel): `--chn-api HIP_BATCHED --dec-api HIP_BATCHED`.
+
+The same with the batched Vulkan modules: `--chn-api VULKAN_BATCHED --dec-api VULKAN_BATCHED`.
+The channel and the decoder must run on the same API (StreamPU does not bind a Vulkan task to a
+CUDA one), and Vulkan numbers its devices in loader order, so `--dev-id 0` may be an integrated
+GPU: `vulkaninfo --summary` lists them, and `VK_DRIVER_FILES=<icd.json>` keeps only one driver.
+
 The GPU options (`--help` lists them all):
 
 | Option | Meaning |
 | --- | --- |
-| `--n-frames <int>` | Frames per firing, for every module (default 1). `CUDA_BATCHED` modules process them in one launch; the others call their kernel once per frame. |
-| `--chn-api <api>` | Channel implementation: `CPU`, `CUDA`, `CUDA_BATCHED`, `CUDA_PRNG`, `HIP_PRNG`, `SYCL_PRNG`, `VULKAN_PRNG`. |
-| `--dec-api <api>` | Decoder backend, among those compiled in (`CUDA`, `CUDA_BATCHED`, `HIP`, `SYCL`, `VULKAN`). |
+| `--n-frames <int>` | Frames per firing, for every module (default 1). `*_BATCHED` modules process them in one launch (the frames on grid y); `*_LOOP` decoders too, with the threads of one frame each looping over the frames; the others call their kernel once per frame. |
+| `--chn-api <api>` | Channel implementation: `CPU`, `CUDA`, `CUDA_BATCHED`, `CUDA_PRNG`, `HIP_PRNG`, `HIP_BATCHED`, `SYCL_PRNG`, `VULKAN_PRNG`, `VULKAN_BATCHED`. `CUDA_BATCHED` runs cuRAND, `HIP_BATCHED` hipRAND, `VULKAN_BATCHED` the Philox generator. |
+| `--dec-api <api>` | Decoder backend, among those compiled in (`CUDA`, `CUDA_BATCHED`, `CUDA_LOOP`, `HIP`, `HIP_BATCHED`, `HIP_LOOP`, `SYCL`, `VULKAN`, `VULKAN_BATCHED`, `VULKAN_LOOP`). `*_LOOP` is the batched decoder with frame-loop kernels: same decoded bits; meant for codes where one frame already fills the GPU. |
 | `--dev-id`, `--plt-id` | GPU device id, and platform id (SYCL only). |
 | `--pip-threads <list>` | Threads per pipeline stage, e.g. `1,4,1,1,1` (`pipeline_gpu`) or `1,4,1,1,1,1` (`pipeline_6st`). |
 
@@ -221,6 +228,7 @@ When in doubt, rebuild all three in order.
 | `The link interface of target "spu::spu-shared-lib" contains: Vulkan::Vulkan but the target was not found` | StreamPU was built with Vulkan but the project is configured without it: add `-DDECODER_VULKAN=ON`, or rebuild StreamPU with `-DSPU_ENABLE_VULKAN=OFF`. |
 | `Architecture version {CUDA_ARCH} is needed for the CUDA` | StreamPU: add `-DCUDA_ARCH=<sm>`. |
 | `Architecture version {HIP_ARCH} is needed for the HIP` | StreamPU: add `-DHIP_ARCH=<gfx...>`. |
+| `DECODER_HIP needs hipRAND` | Project: install ROCm's `hiprand` and `rocrand`, or add their prefix to `CMAKE_PREFIX_PATH`. |
 | `A backend is needed for the OneAPI version` | StreamPU: add `-DBACKEND=<targets>`. |
 | `SYCL_BACKEND is needed for the oneAPI SYCL_COMPILER` | Project: add `-DSYCL_BACKEND=<targets>`. |
 | `Could not find a package configuration file provided by "StreamPU"` | Wrong `StreamPU_DIR`, or StreamPU was not installed. |

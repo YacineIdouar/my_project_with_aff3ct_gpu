@@ -24,6 +24,12 @@ namespace module
  *
  * The hipRAND states are device state of each replica ('per_device'): created by on_device(), re-sized by
  * on_n_frames(), re-seeded by set_seed().
+ *
+ * A replica builds them when it is cloned (on_clone()), not lazily at its first firing as StreamPU would: seeding
+ * ends with a hipDeviceSynchronize(), after which the HIP runtime invalidates every stream capture in flight in the
+ * process, whatever its capture mode -- so a replica setting up would break the graph another GPU task is capturing
+ * ("operation failed due to a previous error during capture"). Built ahead of the run, nothing of it runs while the
+ * pipeline does.
  */
 class Channel_AWGN_LLR_hiprand_batched final : public spu::module::Generic<Channel_AWGN_LLR_hiprand_batched>
 {
@@ -39,6 +45,7 @@ class Channel_AWGN_LLR_hiprand_batched final : public spu::module::Generic<Chann
 
     void on_device(const api exec_api, const int device_id, const int platform_id) override;
     void on_n_frames(const size_t n_frames) override;
+    void on_clone(const size_t replica_id) override;
     void set_seed(const int seed) override;
 
     // The n_f frames of the firing in one launch. 'CP' holds one sigma per frame; the frames of a firing come from

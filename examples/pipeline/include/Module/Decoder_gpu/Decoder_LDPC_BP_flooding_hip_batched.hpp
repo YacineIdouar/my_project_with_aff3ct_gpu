@@ -27,6 +27,12 @@ namespace module
  *
  * The base graph tables and the work buffers of n_f frames are device state of each replica ('per_device'): created
  * by on_device(), re-sized by on_n_frames().
+ *
+ * A replica builds them when it is cloned (on_clone()), not lazily at its first firing as StreamPU would: that setup
+ * makes HIP calls (synchronous copies, frees) after which the HIP runtime invalidates every stream capture in flight in
+ * the process, whatever its capture mode -- so with two replicas, one setting up would break the graph the other is
+ * capturing ("operation failed due to a previous error during capture"). Built ahead of the run, nothing of it runs
+ * while the pipeline does.
  */
 class Decoder_LDPC_BP_flooding_hip_batched final : public spu::module::Generic<Decoder_LDPC_BP_flooding_hip_batched>
 {
@@ -47,6 +53,7 @@ class Decoder_LDPC_BP_flooding_hip_batched final : public spu::module::Generic<D
 
     void on_device(const api exec_api, const int device_id, const int platform_id) override;
     void on_n_frames(const size_t n_frames) override;
+    void on_clone(const size_t replica_id) override;
 
     // The n_f frames of the firing in one chain. 'CWD' is not written, as in the original decoder.
     std::vector<launch_timing> decode_hip(span<const float> Y_N, span<int8_t> CWD, span<int> V_K, call c);

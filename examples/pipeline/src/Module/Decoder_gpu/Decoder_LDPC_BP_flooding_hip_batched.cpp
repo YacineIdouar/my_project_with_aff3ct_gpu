@@ -33,6 +33,9 @@ void
 Decoder_LDPC_BP_flooding_hip_batched::on_device(const api exec_api, const int device_id, const int /*platform_id*/)
 {
     if (exec_api != api::HIP) return;
+    // Already built for this device, by on_clone(): StreamPU still calls this at the replica's first firing, on the
+    // pipeline thread, and building again there is what on_clone() avoids.
+    if (this->dev && this->dev->get_device_id() == device_id) return;
     this->dev = std::make_unique<sp_hip::Hip_decoder_batched>(
       device_id, this->K, this->N_cw, this->get_n_frames(), this->frame_loop);
 
@@ -50,6 +53,17 @@ void
 Decoder_LDPC_BP_flooding_hip_batched::on_n_frames(const size_t n_frames)
 {
     if (this->dev) this->dev->reserve(n_frames);
+}
+
+void
+Decoder_LDPC_BP_flooding_hip_batched::on_clone(const size_t /*replica_id*/)
+{
+    // The device state of the replica, built now -- on the thread that builds the pipeline, before it runs -- rather
+    // than at the replica's first firing (see the class comment). The clone's task carries the API and device of the
+    // module it was cloned from.
+    auto& t = (*this)("decode_siho_gpu");
+    if (t.get_compute_api() == api::HIP)
+        this->on_device(api::HIP, t.get_execution_device_id(), t.get_execution_platform_id());
 }
 
 std::vector<spu::device_interface::launch_timing>

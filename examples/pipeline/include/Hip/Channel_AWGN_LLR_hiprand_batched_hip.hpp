@@ -34,6 +34,7 @@ class Hip_channel_batched
 
     // Samples a call can process.
     size_t capacity() const { return 2 * this->n_states; }
+    int get_device_id() const { return this->dev_id; }
 
     // y[i] = x[i] + sigma * N(0,1) for i < n, through the executor of the task's stream.
     std::vector<spu::device_interface::launch_timing> add_noise(const float* x,

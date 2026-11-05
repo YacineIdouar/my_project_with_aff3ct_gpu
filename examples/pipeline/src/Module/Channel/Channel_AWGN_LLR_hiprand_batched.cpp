@@ -39,15 +39,29 @@ Channel_AWGN_LLR_hiprand_batched::get_N() const
 void
 Channel_AWGN_LLR_hiprand_batched::on_device(const api exec_api, const int device_id, const int /*platform_id*/)
 {
-    if (exec_api == api::HIP)
-        this->dev =
-          std::make_unique<sp_hip::Hip_channel_batched>(device_id, (size_t)this->N * this->get_n_frames(), this->seed);
+    if (exec_api != api::HIP) return;
+    // Already built for this device, by on_clone(): StreamPU still calls this at the replica's first firing, on the
+    // pipeline thread, and building again there is what on_clone() avoids.
+    if (this->dev && this->dev->get_device_id() == device_id) return;
+    this->dev =
+      std::make_unique<sp_hip::Hip_channel_batched>(device_id, (size_t)this->N * this->get_n_frames(), this->seed);
 }
 
 void
 Channel_AWGN_LLR_hiprand_batched::on_n_frames(const size_t n_frames)
 {
     if (this->dev) this->dev->init((size_t)this->N * n_frames, this->seed);
+}
+
+void
+Channel_AWGN_LLR_hiprand_batched::on_clone(const size_t /*replica_id*/)
+{
+    // The states of the replica, built now -- on the thread that builds the pipeline, before it runs -- rather than at
+    // the replica's first firing (see the class comment). The clone's task carries the API and device of the module it
+    // was cloned from. main's Interface_set_seed loop re-seeds them afterwards, still before the run.
+    auto& t = (*this)("add_noise_gpu");
+    if (t.get_compute_api() == api::HIP)
+        this->on_device(api::HIP, t.get_execution_device_id(), t.get_execution_platform_id());
 }
 
 void

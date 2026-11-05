@@ -39,6 +39,7 @@ class Hip_decoder_batched
     Hip_decoder_batched& operator=(const Hip_decoder_batched&) = delete;
 
     const aff3ct::tools::Std_5G_base_graph& get_base_graph() const { return this->bg; }
+    int get_device_id() const { return this->dev_id; }
 
     // Work buffers for 'n_frames' frames (re-allocated when it changes).
     void reserve(size_t n_frames);
