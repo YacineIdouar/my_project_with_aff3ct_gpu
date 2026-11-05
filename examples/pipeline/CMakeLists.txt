@@ -175,6 +175,19 @@ find_package(cpptrace CONFIG 0.4.1)
 find_package(StreamPU REQUIRED)
 find_package(AFF3CT  REQUIRED)
 
+if(DECODER_HIP)
+    # hipRAND, for the device API of Channel_AWGN_LLR_hiprand_batched (hiprand_kernel.h). Looked for here, after
+    # project() has enabled HIP, rather than next to obj-hip: its package config pulls in HIP's own. Only the headers
+    # are used -- the device API is header-only on both HIP platforms (rocRAND on AMD, cuRAND on NVIDIA) -- so
+    # nothing reaches the link of the executables, which take obj-hip's objects and not its link interface.
+    find_package(hiprand CONFIG QUIET HINTS "${CMAKE_HIP_COMPILER_ROCM_ROOT}" "$ENV{ROCM_PATH}" /opt/rocm)
+    if(NOT hiprand_FOUND)
+        message(FATAL_ERROR "pipeline - DECODER_HIP needs hipRAND (the hipRAND channel, --chn-api HIP_BATCHED): "
+                            "install hiprand and rocrand from ROCm, or add their prefix to CMAKE_PREFIX_PATH.")
+    endif()
+    target_link_libraries(obj-hip PRIVATE hip::hiprand)
+endif()
+
 # The copies of StreamPU's adaptors between the CPU and the GPU stages (SPU_GPU_TRANSFER) are counted
 # in spu::device_interface::gpu_transfer_stats() since the TidePU branches that have them. Look for it
 # in the installed headers, so that an older StreamPU still builds: the copy report then says it has
@@ -365,9 +378,9 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Check of the batched channels and LDPC decoders against the original modules, for each backend that has them
-# (CUDA, Vulkan)
+# (CUDA, HIP, Vulkan)
 # ---------------------------------------------------------------------------
-if(DECODER_CUDA OR DECODER_VULKAN)
+if(DECODER_CUDA OR DECODER_HIP OR DECODER_VULKAN)
     add_executable(pipeline_tidepu_check
         ${link-objects}
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main_tidepu_check.cpp

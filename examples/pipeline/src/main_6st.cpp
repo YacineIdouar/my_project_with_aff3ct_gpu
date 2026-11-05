@@ -23,6 +23,10 @@
 #include "Module/Channel/Channel_AWGN_LLR_curand_batched.hpp"
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_cuda_batched.hpp"
 #endif
+#ifdef DECODER_HIP // batched HIP modules: all the frames of a firing in one launch
+#include "Module/Channel/Channel_AWGN_LLR_hiprand_batched.hpp"
+#include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_hip_batched.hpp"
+#endif
 #ifdef DECODER_VULKAN // batched Vulkan modules: all the frames of a firing in one dispatch chain
 #include "Module/Channel/Channel_AWGN_LLR_prng_vulkan_batched.hpp"
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_vulkan_batched.hpp"
@@ -51,6 +55,8 @@ static std::string compiled_decoder_apis()
 #endif
 #ifdef DECODER_HIP
     add("HIP");
+    add("HIP_BATCHED");
+    add("HIP_LOOP");
 #endif
 #ifdef DECODER_SYCL
     add("SYCL");
@@ -105,7 +111,7 @@ static spu::device_interface::compute_api str_to_compute_api(const std::string& 
 // those two differ only by the compute_api set on the task. All flavours share their socket names,
 // and all the GPU ones share their task name, but the CPU one does not, so the choice has to be
 // carried around at bind time.
-enum class channel_impl { CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, SYCL_PRNG, VULKAN_PRNG, VULKAN_BATCHED };
+enum class channel_impl { CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, HIP_BATCHED, SYCL_PRNG, VULKAN_PRNG, VULKAN_BATCHED };
 
 static const char* channel_task_name(const channel_impl impl)
 {
@@ -122,6 +128,7 @@ static spu::device_interface::compute_api channel_compute_api(const channel_impl
     switch (impl)
     {
         case channel_impl::HIP_PRNG:    return spu::device_interface::compute_api::HIP;
+        case channel_impl::HIP_BATCHED: return spu::device_interface::compute_api::HIP;
         case channel_impl::SYCL_PRNG:   return spu::device_interface::compute_api::SYCL;
         case channel_impl::VULKAN_PRNG:    return spu::device_interface::compute_api::VULKAN;
         case channel_impl::VULKAN_BATCHED: return spu::device_interface::compute_api::VULKAN;
@@ -141,6 +148,7 @@ static channel_impl str_to_channel_impl(const std::string& s, const char* opt)
 #endif
 #ifdef DECODER_HIP
     if (s == "HIP_PRNG")       return channel_impl::HIP_PRNG;
+    if (s == "HIP_BATCHED")    return channel_impl::HIP_BATCHED;
 #endif
 #ifdef DECODER_SYCL
     if (s == "SYCL_PRNG")      return channel_impl::SYCL_PRNG;
@@ -219,10 +227,11 @@ static void print_gpu_options_help()
               << compiled_decoder_apis() << "}  [" << default_decoder_api() << "]" << std::endl;
     std::cout << "  --chn-api <api>   Channel implementation, one of                          [CUDA]"
               << std::endl;
-    std::cout << "                    {CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, SYCL_PRNG," << std::endl;
-    std::cout << "                     VULKAN_PRNG, VULKAN_BATCHED}; CUDA_BATCHED runs cuRAND,"  << std::endl;
-    std::cout << "                    VULKAN_BATCHED the Philox generator, on all the frames of" << std::endl;
-    std::cout << "                    a firing in one launch"                                   << std::endl;
+    std::cout << "                    {CPU, CUDA, CUDA_BATCHED, CUDA_PRNG, HIP_PRNG, HIP_BATCHED," << std::endl;
+    std::cout << "                     SYCL_PRNG, VULKAN_PRNG, VULKAN_BATCHED}; CUDA_BATCHED"     << std::endl;
+    std::cout << "                    runs cuRAND, HIP_BATCHED hipRAND, VULKAN_BATCHED the"        << std::endl;
+    std::cout << "                    Philox generator, on all the frames of a firing in one"      << std::endl;
+    std::cout << "                    launch"                                                      << std::endl;
     std::cout << "                    CUDA and CUDA_PRNG both run cuRAND; HIP/SYCL/VULKAN_PRNG"  << std::endl;
     std::cout << "                    run the hand-written Philox4x32-10 generator"              << std::endl;
     std::cout << "  --pip-threads <list>  Threads per pipeline stage           [1,4,1,1,1,1]"
@@ -404,7 +413,7 @@ struct params
     int dev_id      = 0;       // --dev-id:  GPU device id used by every GPU module
     int platform_id = 0;       // --plt-id:  GPU platform id (only SYCL indexes by platform)
     int n_frames    = 1;       // --n-frames: frames per firing, for every module
-    bool dec_batched = false;  // --dec-api <API>_BATCHED: batched decoder module (of dec_api: CUDA or VULKAN)
+    bool dec_batched = false;  // --dec-api <API>_BATCHED: batched decoder module (of dec_api: CUDA, HIP or VULKAN)
     bool dec_frame_loop = false; // --dec-api <API>_LOOP: the batched decoder module, frame-loop variant
     int dec_n_ite   = 10;      // --dec-ite: decoder iterations (read back from the codec factory)
     spu::device_interface::compute_api dec_api = // --dec-api: backend the decoder task executes on
@@ -445,6 +454,10 @@ struct modules
 #ifdef DECODER_CUDA // batched CUDA modules (--chn-api / --dec-api CUDA_BATCHED)
     std::unique_ptr<module::Channel_AWGN_LLR_curand_batched>       channel_gpu_batched;
     std::unique_ptr<module::Decoder_LDPC_BP_flooding_cuda_batched> decoder_gpu_batched;
+#endif
+#ifdef DECODER_HIP // batched HIP modules (--chn-api HIP_BATCHED / --dec-api HIP_BATCHED, HIP_LOOP)
+    std::unique_ptr<module::Channel_AWGN_LLR_hiprand_batched>     channel_hip_batched;
+    std::unique_ptr<module::Decoder_LDPC_BP_flooding_hip_batched> decoder_hip_batched;
 #endif
 #ifdef DECODER_VULKAN // batched Vulkan modules (--chn-api / --dec-api VULKAN_BATCHED)
     std::unique_ptr<module::Channel_AWGN_LLR_prng_vulkan_batched>    channel_vk_batched;
@@ -585,6 +598,13 @@ int main(int argc, char** argv)
     for (auto* dec : u.pipeline->get_modules<module::Decoder_LDPC_BP_flooding_cuda_batched>())
         dec->dump_profiling(std::cout);
 #endif
+#ifdef DECODER_HIP
+    // same for the batched HIP modules
+    for (auto* chn : u.pipeline->get_modules<module::Channel_AWGN_LLR_hiprand_batched>())
+        chn->dump_profiling(std::cout);
+    for (auto* dec : u.pipeline->get_modules<module::Decoder_LDPC_BP_flooding_hip_batched>())
+        dec->dump_profiling(std::cout);
+#endif
 #ifdef DECODER_VULKAN
     // same for the batched Vulkan modules
     for (auto* chn : u.pipeline->get_modules<module::Channel_AWGN_LLR_prng_vulkan_batched>())
@@ -617,6 +637,10 @@ void init_params(int argc, char** argv, params &p)
 #ifdef DECODER_CUDA
     if (api_str == "CUDA_BATCHED")   { p.dec_batched = true; p.dec_api = spu::device_interface::compute_api::CUDA;   }
     if (api_str == "CUDA_LOOP")      { p.dec_batched = true; p.dec_frame_loop = true; p.dec_api = spu::device_interface::compute_api::CUDA; }
+#endif
+#ifdef DECODER_HIP
+    if (api_str == "HIP_BATCHED")    { p.dec_batched = true; p.dec_api = spu::device_interface::compute_api::HIP;    }
+    if (api_str == "HIP_LOOP")       { p.dec_batched = true; p.dec_frame_loop = true; p.dec_api = spu::device_interface::compute_api::HIP; }
 #endif
 #ifdef DECODER_VULKAN
     if (api_str == "VULKAN_BATCHED") { p.dec_batched = true; p.dec_api = spu::device_interface::compute_api::VULKAN; }
@@ -731,6 +755,14 @@ void init_modules(const params &p, modules &m)
 	}
 	else
 #endif
+#ifdef DECODER_HIP
+	if (p.chn_api == channel_impl::HIP_BATCHED)
+	{
+		m.channel_hip_batched.reset(new aff3ct::module::Channel_AWGN_LLR_hiprand_batched(p.channel.get()->N, p.channel.get()->seed));
+		m.channel             = m.channel_hip_batched.get();
+	}
+	else
+#endif
 #ifdef DECODER_VULKAN
 	if (p.chn_api == channel_impl::VULKAN_BATCHED)
 	{
@@ -758,6 +790,14 @@ void init_modules(const params &p, modules &m)
     {
         m.decoder_gpu_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dec_frame_loop));
         m.decoder = m.decoder_gpu_batched.get();
+    }
+    else
+#endif
+#ifdef DECODER_HIP
+    if (p.dec_batched && p.dec_api == spu::device_interface::compute_api::HIP)
+    {
+        m.decoder_hip_batched.reset(new aff3ct::module::Decoder_LDPC_BP_flooding_hip_batched(p.codec.get()->K, p.codec->enc.get()->N_cw, p.puncturer.get()->N, p.dec_n_ite, p.dec_frame_loop));
+        m.decoder = m.decoder_hip_batched.get();
     }
     else
 #endif

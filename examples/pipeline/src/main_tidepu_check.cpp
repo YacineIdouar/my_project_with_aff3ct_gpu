@@ -7,7 +7,12 @@
 //   same seed, same counter sequence, same dispatch, so the same noisy frames, at 1 and 4 frames per firing;
 //   aff3ct::module::Decoder_LDPC_BP_flooding_vulkan_batched (n_f frames per chain) vs Decoder_LDPC_BP_flooding_gpu
 //   (one frame per chain, VULKAN): same decoded bits for every frame.
-// - Both backends: the frame-loop variant of the batched decoder (the threads of one frame, each looping over the n_f
+// - HIP: aff3ct::module::Channel_AWGN_LLR_hiprand_batched has no original to match (the original HIP channel runs
+//   Philox, not hipRAND): checked against a second instance of itself (same seed, so the same noisy frames) and on the
+//   noise statistics, at 1 and 4 frames per firing;
+//   aff3ct::module::Decoder_LDPC_BP_flooding_hip_batched (n_f frames per chain) vs Decoder_LDPC_BP_flooding_gpu (one
+//   frame per chain, HIP): same decoded bits for every frame.
+// - Every backend: the frame-loop variant of the batched decoder (the threads of one frame, each looping over the n_f
 //   frames) vs the same original decoder: same decoded bits for every frame.
 //
 // Usage: pipeline_tidepu_check [K] [N] [n_ite]   (5G LDPC, default K=1000 N=2000 n_ite=10)
@@ -30,6 +35,10 @@
 #ifdef DECODER_CUDA
 #include "Module/Channel/Channel_AWGN_LLR_curand_batched.hpp"
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_cuda_batched.hpp"
+#endif
+#ifdef DECODER_HIP
+#include "Module/Channel/Channel_AWGN_LLR_hiprand_batched.hpp"
+#include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_hip_batched.hpp"
 #endif
 #ifdef DECODER_VULKAN
 #include "Module/Channel/Channel_AWGN_LLR_prng_vulkan_batched.hpp"
@@ -143,6 +152,8 @@ use_api(std::unique_ptr<M> module, const api exec_api)
     return module;
 }
 
+// 'make_ref' may be empty, when no original module draws the same noise as the port (HIP: the original HIP channel
+// runs Philox, not hipRAND): the port is then compared with a second instance of itself, built with the same seed.
 void
 test_channel(const std::string& what, const int N, const make_channel& make_ref, const make_channel& make_new)
 {
@@ -156,12 +167,14 @@ test_channel(const std::string& what, const int N, const make_channel& make_ref,
     for (const size_t n_frames : { 1, 4 })
     {
         std::cout << "# Channel: " << what << ", " << n_frames << " frame(s)/firing" << std::endl;
-        const auto ref_chn = make_ref(N, seed);
+        const auto ref_chn = make_ref ? make_ref(N, seed) : make_new(N, seed);
         const auto new_chn = make_new(N, seed);
 
         const auto ref = run<float>(*ref_chn, "add_noise_gpu", "X_N", "Y_N", "CP", N, frames, sigma, n_frames);
         const auto got = run<float>(*new_chn, "add_noise_gpu", "X_N", "Y_N", "CP", N, frames, sigma, n_frames);
-        check(ref.size() == N_FRAMES_TOTAL && got == ref, "same noisy frames as the original module");
+        check(ref.size() == N_FRAMES_TOTAL && got == ref,
+              make_ref ? "same noisy frames as the original module"
+                       : "same noisy frames as a second instance with the same seed (no original to match)");
 
         // and the noise is a standard Gaussian scaled by sigma
         std::vector<std::vector<double>> noise(got.size(), std::vector<double>(N));
@@ -289,6 +302,33 @@ main(int argc, char** argv)
           return use_api(
             std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_cuda_batched>(K, N_LDPC, N, n_ite, true),
             api::CUDA);
+      });
+#endif
+#ifdef DECODER_HIP
+    test_backend(
+      "HIP, hipRAND channel (vs itself) / batched decoder vs Decoder_LDPC_BP_flooding_gpu",
+      K,
+      N,
+      n_ite,
+      nullptr, // no original channel draws hipRAND noise
+      [](int n, int seed)
+      { return use_api(std::make_unique<aff3ct::module::Channel_AWGN_LLR_hiprand_batched>(n, seed), api::HIP); },
+      [&]()
+      {
+          return on_api(std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_gpu<float, int>>(K, N_LDPC, N, n_ite, 0, 0),
+                        "decode_siho_gpu",
+                        api::HIP);
+      },
+      [&]()
+      {
+          return use_api(std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_hip_batched>(K, N_LDPC, N, n_ite),
+                         api::HIP);
+      },
+      [&]()
+      {
+          return use_api(
+            std::make_unique<aff3ct::module::Decoder_LDPC_BP_flooding_hip_batched>(K, N_LDPC, N, n_ite, true),
+            api::HIP);
       });
 #endif
 #ifdef DECODER_VULKAN
