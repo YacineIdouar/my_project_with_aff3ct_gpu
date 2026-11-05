@@ -175,6 +175,26 @@ find_package(cpptrace CONFIG 0.4.1)
 find_package(StreamPU REQUIRED)
 find_package(AFF3CT  REQUIRED)
 
+# The copies of StreamPU's adaptors between the CPU and the GPU stages (SPU_GPU_TRANSFER) are counted
+# in spu::device_interface::gpu_transfer_stats() since the TidePU branches that have them. Look for it
+# in the installed headers, so that an older StreamPU still builds: the copy report then says it has
+# nothing (see include/Module/Decoder_gpu/gpu_transfer_report.hpp).
+set(HAS_SPU_TRANSFER_STATS OFF)
+foreach(spu_target spu::spu-static-lib spu::spu-shared-lib)
+    if(TARGET ${spu_target})
+        get_target_property(spu_include_dirs ${spu_target} INTERFACE_INCLUDE_DIRECTORIES)
+        foreach(spu_include_dir ${spu_include_dirs})
+            if(EXISTS "${spu_include_dir}/Device/Gpu_batch.hpp")
+                file(STRINGS "${spu_include_dir}/Device/Gpu_batch.hpp" spu_transfer_stats REGEX "gpu_transfer_stats\\(\\)")
+                if(spu_transfer_stats)
+                    set(HAS_SPU_TRANSFER_STATS ON)
+                endif()
+            endif()
+        endforeach()
+    endif()
+endforeach()
+message(STATUS "StreamPU - Copy costs at the adaptors: ${HAS_SPU_TRANSFER_STATS}")
+
 # The CUDA decoder builds its kernels as one chain and hands it to StreamPU's launch(), which is
 # unconditional API now -- there is no per-kernel fallback to probe for, and no compile definition to
 # set. --gpu-dispatch chooses how that chain is issued (graph vs one-by-one) through
@@ -335,6 +355,12 @@ if(DECODER_VULKAN)
     target_link_libraries(pipeline_cpu PRIVATE Vulkan::Vulkan)
     target_link_libraries(pipeline_gpu PRIVATE Vulkan::Vulkan)
     target_link_libraries(pipeline_6st PRIVATE Vulkan::Vulkan)
+endif()
+
+# the copy report of the GPU pipelines (see above, after find_package(StreamPU))
+if(HAS_SPU_TRANSFER_STATS)
+    target_compile_definitions(pipeline_gpu PRIVATE HAS_SPU_TRANSFER_STATS)
+    target_compile_definitions(pipeline_6st PRIVATE HAS_SPU_TRANSFER_STATS)
 endif()
 
 # ---------------------------------------------------------------------------

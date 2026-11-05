@@ -16,6 +16,7 @@
 #include "Module/Decoder_gpu/Decoder_LDPC_BP_flooding_gpu.hpp"
 #include "Module/Decoder_gpu/gpu_decoder_profiling.hpp"
 #include "Module/Decoder_gpu/gpu_dispatch_mode.hpp"
+#include "Module/Decoder_gpu/gpu_transfer_report.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_gpu.hpp"
 #include "Module/Channel/Channel_AWGN_LLR_prng_gpu.hpp"
 #ifdef DECODER_CUDA // batched CUDA modules: all the frames of a firing in one launch
@@ -573,6 +574,9 @@ int main(int argc, char** argv)
     // written by the decoding threads without synchronisation, so they are only stable once those
     // threads have joined. Prints nothing when no decode was profiled.
     gpu_prof::print_report(std::cout);
+    // The copies of StreamPU's adaptors between the CPU and the GPU stages, over the whole sweep
+    // (also complete only once pipeline->exec() has returned). Prints nothing without copies.
+    gpu_transfer::print_report(std::cout);
 
 #ifdef DECODER_CUDA
     // launch timings of the batched CUDA modules, one entry per firing (nothing when they are not used)
@@ -695,6 +699,7 @@ void init_params(int argc, char** argv, params &p)
 #endif
     std::cout << "#    ** Decode profiling              = " << (p.dec_profile ? "on" : "off") << std::endl;
     std::cout << "#    ** GPU dispatch                  = " << gpu_dispatch::describe() << std::endl;
+    std::cout << "#    ** GPU transfer                  = " << gpu_transfer::describe() << std::endl;
     std::cout << "#" << std::endl;
     cp.print_warnings();
 
