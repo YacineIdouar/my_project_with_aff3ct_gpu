@@ -28,11 +28,11 @@ namespace module
  * The base graph tables and the work buffers of n_f frames are device state of each replica ('per_device'): created
  * by on_device(), re-sized by on_n_frames().
  *
- * A replica builds them when it is cloned (on_clone()), not lazily at its first firing as StreamPU would: that setup
- * makes HIP calls (synchronous copies, frees) after which the HIP runtime invalidates every stream capture in flight in
- * the process, whatever its capture mode -- so with two replicas, one setting up would break the graph the other is
- * capturing ("operation failed due to a previous error during capture"). Built ahead of the run, nothing of it runs
- * while the pipeline does.
+ * While a stream capture is in flight anywhere in the process (another replica recording its HIP graph), the HIP
+ * runtime fails a synchronous hipMemcpy() with hipErrorStreamCaptureImplicit and invalidates every capture in flight,
+ * whatever its mode ("operation failed due to a previous error during capture" in the replica that was recording). So
+ * the setup uploads the tables on a stream of its own instead, and a replica builds its state when it is cloned
+ * (on_clone()), ahead of the run, rather than lazily at its first firing as StreamPU would.
  */
 class Decoder_LDPC_BP_flooding_hip_batched final : public spu::module::Generic<Decoder_LDPC_BP_flooding_hip_batched>
 {

@@ -25,11 +25,11 @@ namespace module
  * The hipRAND states are device state of each replica ('per_device'): created by on_device(), re-sized by
  * on_n_frames(), re-seeded by set_seed().
  *
- * A replica builds them when it is cloned (on_clone()), not lazily at its first firing as StreamPU would: seeding
- * ends with a hipDeviceSynchronize(), after which the HIP runtime invalidates every stream capture in flight in the
- * process, whatever its capture mode -- so a replica setting up would break the graph another GPU task is capturing
- * ("operation failed due to a previous error during capture"). Built ahead of the run, nothing of it runs while the
- * pipeline does.
+ * While a stream capture is in flight anywhere in the process (a GPU task recording its HIP graph), the HIP runtime
+ * fails a synchronous copy, a null-stream operation or a device synchronisation, and invalidates every capture in
+ * flight, whatever its mode ("operation failed due to a previous error during capture" in the task that was
+ * recording). So the setup makes none of these calls (it seeds on a stream of its own), and a replica builds its states
+ * when it is cloned (on_clone()), ahead of the run, rather than lazily at its first firing as StreamPU would.
  */
 class Channel_AWGN_LLR_hiprand_batched final : public spu::module::Generic<Channel_AWGN_LLR_hiprand_batched>
 {

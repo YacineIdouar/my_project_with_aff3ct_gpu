@@ -47,6 +47,21 @@ blocks_for(const uint32_t n, const uint32_t bs)
     return (n + bs - 1) / bs;
 }
 
+// A stream of its own for the setup copies, instead of hipMemcpy(): a synchronous hipMemcpy() goes through the null
+// stream, and while a stream capture is in flight anywhere in the process -- another replica recording its HIP graph
+// -- the HIP runtime fails it with hipErrorStreamCaptureImplicit and invalidates every capture in flight, whatever
+// its mode. A non-blocking stream of our own, waited for on its own, leaves the other captures alone.
+class Setup_stream
+{
+  public:
+    hipStream_t handle = nullptr;
+    Setup_stream() { check(hipStreamCreateWithFlags(&handle, hipStreamNonBlocking), "hipStreamCreateWithFlags"); }
+    ~Setup_stream() { (void)hipStreamDestroy(this->handle); }
+    Setup_stream(const Setup_stream&) = delete;
+    Setup_stream& operator=(const Setup_stream&) = delete;
+    void wait() { check(hipStreamSynchronize(this->handle), "hipStreamSynchronize (setup)"); }
+};
+
 __global__ void
 clip_channel_kernel(const float* __restrict__ in,
                     const uint32_t in_stride,
@@ -354,17 +369,19 @@ upload_tables(Std_5G_base_graph& bg)
     const uint32_t sz_vn[2][8] = { { BG1_VN_TABLE(sizeof) }, { BG2_VN_TABLE(sizeof) } };
     const uint32_t b = bg.Bg - 1;
 
-    auto upload = [](const uint32_t*& dst, const void* src, const size_t bytes)
+    Setup_stream setup; // not hipMemcpy(): see Setup_stream
+    auto upload = [&setup](const uint32_t*& dst, const void* src, const size_t bytes)
     {
         void* ptr = nullptr;
         check(hipMalloc(&ptr, bytes), "hipMalloc (LDPC tables)");
-        check(hipMemcpy(ptr, src, bytes, hipMemcpyHostToDevice), "hipMemcpy (LDPC tables)");
         dst = static_cast<const uint32_t*>(ptr);
+        check(hipMemcpyAsync(ptr, src, bytes, hipMemcpyHostToDevice, setup.handle), "hipMemcpyAsync (LDPC tables)");
     };
     upload(bg.cn_degree, h_cn_degree[b][ils], sz_cn_degree[b][ils]);
     upload(bg.vn_degree, h_vn_degree[b][ils], sz_vn_degree[b][ils]);
     upload(bg.cn, h_cn[b][ils], sz_cn[b][ils]);
     upload(bg.vn, h_vn[b][ils], sz_vn[b][ils]);
+    setup.wait();
     bg.cn_stride = sz_cn[b][ils] / (sizeof(uint32_t) * bg.num_rows);
     bg.vn_stride = sz_vn[b][ils] / (sizeof(uint32_t) * bg.num_cols);
 }
@@ -401,8 +418,9 @@ sp_hip::Hip_decoder_batched::reserve(const size_t n_frames)
 {
     if (n_frames == this->n_frames) return;
     check(hipSetDevice(this->dev_id), "hipSetDevice");
-    (void)hipFree(this->llr_msg);
-    (void)hipFree(this->llr_total);
+    // only what was allocated: no hipFree() call at all on the first reservation (a free may synchronise the device)
+    if (this->llr_msg != nullptr) (void)hipFree(this->llr_msg);
+    if (this->llr_total != nullptr) (void)hipFree(this->llr_total);
     this->llr_msg = nullptr;
     this->llr_total = nullptr;
 

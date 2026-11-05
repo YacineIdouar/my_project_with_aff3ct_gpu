@@ -89,12 +89,20 @@ sp_hip::Hip_channel_batched::init(const size_t max_samples, const uint64_t seed)
         this->n_states = n_states;
     }
 
-    // setup, not part of a firing: launched directly and waited for
+    // Setup, not part of a firing: launched directly and waited for -- on a non-blocking stream of its own, not on the
+    // null stream with a hipDeviceSynchronize(). While a stream capture is in flight anywhere in the process (another
+    // GPU task recording its HIP graph), the HIP runtime fails a device synchronisation or a null-stream operation and
+    // invalidates every capture in flight, whatever its mode.
+    hipStream_t setup = nullptr;
+    check(hipStreamCreateWithFlags(&setup, hipStreamNonBlocking), "hipStreamCreateWithFlags (hipRAND states)");
     const unsigned blocks = (unsigned)((n_states + THREADS - 1) / THREADS);
-    init_states_kernel<<<blocks, THREADS>>>(
+    init_states_kernel<<<blocks, THREADS, 0, setup>>>(
       static_cast<hiprandStateXORWOW_t*>(this->d_states), (uint32_t)n_states, (unsigned long long)seed);
-    check(hipGetLastError(), "init_states_kernel launch");
-    check(hipDeviceSynchronize(), "init_states_kernel");
+    const hipError_t launch_error = hipGetLastError();
+    const hipError_t sync_error = launch_error == hipSuccess ? hipStreamSynchronize(setup) : hipSuccess;
+    (void)hipStreamDestroy(setup);
+    check(launch_error, "init_states_kernel launch");
+    check(sync_error, "init_states_kernel");
 }
 
 std::vector<spu::device_interface::launch_timing>
